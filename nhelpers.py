@@ -1,4 +1,4 @@
-from namedtensor import NamedTensor
+from namedtensor import NamedTensor, ntorch
 
 
 def repeat(tensor, dims_sizes):
@@ -15,6 +15,11 @@ def repeat(tensor, dims_sizes):
         tensor._tensor.repeat(new_sizes), names
     )
 
+def masked_fill(tensor, mask, value):
+    order = mask._mask_broadcast_order(tensor._schema._names)
+    mask = mask._force_order(order)
+    tensor = tensor._force_order(order)
+    return NamedTensor(tensor.values.masked_fill(mask.values, value), tensor._schema._names)
 
 def replace_masked_values(tensor, mask, replace_with):
     if tensor.dim() != mask.dim():
@@ -22,10 +27,7 @@ def replace_masked_values(tensor, mask, replace_with):
             "tensor.dim() (%d) != mask.dim() (%d)"
             % (tensor.dim(), mask.dim())
         )
-    return tensor.masked_fill_(
-        (1 - mask).byte(), replace_with
-    )
-
+    return masked_fill(tensor, (1 - mask).byte(), replace_with)
 
 def masked_softmax(
     vector,
@@ -40,9 +42,7 @@ def masked_softmax(
         result = result * mask
         result = result / (result.sum(dim) + 1e-13)
     else:
-        masked_vector = vector.masked_fill_(
-            (1 - mask).byte(), mask_fill_value
-        )
+        masked_vector = masked_fill(vector, (1 - mask).byte(), mask_fill_value)
         result = masked_vector.softmax(dim)
     return result
 
@@ -65,18 +65,17 @@ def get_best_span(span_start_logits, span_end_logits):
     )
 
     span_log_probs = span_start_logits + span_end_logits
-
+    device = span_log_probs.values.device
     span_log_mask = (
         ntorch.triu(
             ntorch.ones(
                 passage_length,
                 passage_length,
                 names=("sseqlen", "eseqlen"),
-            ),
+            ).to(device),
             dims=("sseqlen", "eseqlen"),
         )
         .log()
-        .cuda()
     )
     valid_span_log_probs = span_log_probs + span_log_mask
 
@@ -90,3 +89,10 @@ def get_best_span(span_start_logits, span_end_logits):
     )
 
     return span_start_indices, span_end_indices
+
+def tokenlist_to_passage(token_text):
+    str_list = list(map(lambda x : x[2:] if len(x)>2 and x[:2]=="##" else " " + x, token_text))
+    string = "".join(str_list)
+    if string[0] == " ":
+        string = string[1:]
+    return string

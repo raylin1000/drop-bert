@@ -17,6 +17,20 @@ from pytorch_pretrained_bert import BertTokenizer
 
 from .nhelpers import tokenlist_to_passage
 
+def get_answer_type(answers):
+    types = []
+    if answers['number'] != '':
+        types.append('number')
+    elif len(answers['spans']) > 0:
+        if len(answers['spans']) == 1:
+            types.append('single_span')
+        else:
+            types.append('multiple_span')
+    else:
+        types.append('date')
+    return types
+        
+
 @Tokenizer.register("bert-drop")
 class BertDropTokenizer(Tokenizer):
     def __init__(self, pretrained_model: str):
@@ -45,11 +59,15 @@ class BertDropReader(DatasetReader):
                  tokenizer: Tokenizer = None,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False,
-                 max_pieces: int = 512):
+                 max_pieces: int = 512,
+                 answer_type: str = None,
+                 use_validated: bool = True):
         super(BertDropReader, self).__init__(lazy)
         self.tokenizer = tokenizer
         self.token_indexers = token_indexers
         self.max_pieces = max_pieces
+        self.answer_type = answer_type
+        self.use_validated = use_validated
         
     @overrides
     def _read(self, file_path: str):
@@ -67,7 +85,9 @@ class BertDropReader(DatasetReader):
                 answer_annotations = []
                 if "answer" in question_answer:
                     answer_annotations.append(question_answer["answer"])
-                if "validated_answers" in question_answer:
+                    if self.answer_type is not None and self.answer_type not in get_answer_type(question_answer['answer']):
+                        continue
+                if self.use_validated and "validated_answers" in question_answer:
                     answer_annotations += question_answer["validated_answers"]
                 instance = self.text_to_instance(question_text,
                                                  passage_text,

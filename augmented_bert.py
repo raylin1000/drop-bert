@@ -24,15 +24,9 @@ logger = logging.getLogger(__name__)
 @Model.register("nabert")
 class NumericallyAugmentedBERT(Model):
     """
-    This class augments the QANet model with some rudimentary numerical reasoning abilities, as
-    published in the original DROP paper.
-
-    The main idea here is that instead of just predicting a passage span after doing all of the
-    QANet modeling stuff, we add several different "answer abilities": predicting a span from the
-    question, predicting a count, or predicting an arithmetic expression.  Near the end of the
-    QANet model, we have a variable that predicts what kind of answer type we need, and each branch
-    has separate modeling logic to predict that answer type.  We then marginalize over all possible
-    ways of getting to the right answer through each of these answer types.
+    This class augments BERT with some rudimentary numerical reasoning abilities. This is based on
+    NAQANet, as published in the original DROP paper. The code is based on the AllenNLP 
+    implementation of NAQANet
     """
     def __init__(self, 
                  vocab: Vocabulary, 
@@ -52,62 +46,40 @@ class NumericallyAugmentedBERT(Model):
 
         self.BERT = BertModel.from_pretrained(bert_pretrained_model)
         self.tokenizer = BertTokenizer.from_pretrained(bert_pretrained_model)
-        bert_hidden_dim = self.BERT.pooler.dense.out_features
+        bert_dim = self.BERT.pooler.dense.out_features
+        
+        self.dropout = dropout_prob
 
-        self._passage_weights_predictor = torch.nn.Linear(bert_hidden_dim, 1)
-        self._question_weights_predictor = torch.nn.Linear(bert_hidden_dim, 1)
-
+        self._passage_weights_predictor = torch.nn.Linear(bert_dim, 1)
+        self._question_weights_predictor = torch.nn.Linear(bert_dim, 1)
+        
         if len(self.answering_abilities) > 1:
-            self._answer_ability_predictor = FeedForward(2 * bert_hidden_dim,
-                                                         activations=[Activation.by_name('relu')(),
-                                                                      Activation.by_name('linear')()],
-                                                         hidden_dims=[bert_hidden_dim,
-                                                                      len(self.answering_abilities)],
-                                                         num_layers=2,
-                                                         dropout=dropout_prob)
+            self._answer_ability_predictor = \
+                self._ability_ff(2 * bert_dim, bert_dim, len(self.answering_abilities))
 
         if "passage_span_extraction" in self.answering_abilities:
             self._passage_span_extraction_index = self.answering_abilities.index("passage_span_extraction")
-            self._passage_span_start_predictor = FeedForward(bert_hidden_dim,
-                                                             activations=[Activation.by_name('linear')()],
-                                                             hidden_dims=[1],
-                                                             num_layers=1)
-            self._passage_span_end_predictor = FeedForward(bert_hidden_dim,
-                                                           activations=[Activation.by_name('linear')()],
-                                                           hidden_dims=[1],
-                                                           num_layers=1)
+            self._passage_span_start_predictor = torch.nn.Linear(bert_dim, 1)
+            self._passage_span_end_predictor = torch.nn.Linear(bert_dim, 1)
 
         if "question_span_extraction" in self.answering_abilities:
             self._question_span_extraction_index = self.answering_abilities.index("question_span_extraction")
-            self._question_span_start_predictor = FeedForward(bert_hidden_dim * 2,
-                                                              activations=[Activation.by_name('relu')(),
-                                                                           Activation.by_name('linear')()],
-                                                              hidden_dims=[bert_hidden_dim, 1],
-                                                              num_layers=2)
-            self._question_span_end_predictor = FeedForward(bert_hidden_dim * 2,
-                                                            activations=[Activation.by_name('relu')(),
-                                                                         Activation.by_name('linear')()],
-                                                            hidden_dims=[bert_hidden_dim, 1],
-                                                            num_layers=2)
+            self._question_span_start_predictor = \
+                self._ability_ff(2 * bert_dim, bert_dim, 1)
+            self._question_span_end_predictor = \
+                self._ability_ff(2 * bert_dim, bert_dim, 1)
 
         if "addition_subtraction" in self.answering_abilities:
             self._addition_subtraction_index = self.answering_abilities.index("addition_subtraction")
-            self._number_sign_predictor = FeedForward(bert_hidden_dim * 2,
-                                                      activations=[Activation.by_name('relu')(),
-                                                                   Activation.by_name('linear')()],
-                                                      hidden_dims=[bert_hidden_dim, 3],
-                                                      num_layers=2)
+            self._number_sign_predictor = \
+                self._ability_ff(2 * bert_dim, bert_dim, 3)
 
         if "counting" in self.answering_abilities:
             self._counting_index = self.answering_abilities.index("counting")
-            self._count_number_predictor = FeedForward(bert_hidden_dim,
-                                                       activations=[Activation.by_name('relu')(),
-                                                                    Activation.by_name('linear')()],
-                                                       hidden_dims=[bert_hidden_dim, 10],
-                                                       num_layers=2)
+            self._count_number_predictor = \
+                self._ability_ff(bert_dim, bert_dim, 10)
 
         self._drop_metrics = DropEmAndF1()
-        self._dropout = torch.nn.Dropout(p=dropout_prob)
         self.device = torch.cuda.current_device() # torch.device('cpu')
         initializer(self)
 
@@ -123,6 +95,12 @@ class NumericallyAugmentedBERT(Model):
         # Shape: (batch_size, out)
         h = util.weighted_sum(encoding, alpha)
         return h
+    
+    def _ability_ff(self, input_dim, hidden_dim, output_dim):
+        return torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim),
+                                   torch.nn.ReLU(),
+                                   torch.nn.Dropout(self.dropout),
+                                   torch.nn.Linear(hidden_dim, output_dim))
 
     def forward(self,  # type: ignore
                 question_passage: Dict[str, torch.LongTensor],
@@ -155,21 +133,20 @@ class NumericallyAugmentedBERT(Model):
         # Shape: (batch_size, seqlen)
         question_mask = (1 - seqlen_ids) * pad_mask * cls_sep_mask
         
-        # Shape: (batch_size, seqlen, out)
+        # Shape: (batch_size, seqlen, bert_dim)
         bert_out, _ = self.BERT(question_passage_tokens, seqlen_ids, pad_mask, output_all_encoded_layers=False)
 
-        question_start = 0
-        question_end = min(max(mask[:,1]), max_seqlen)
-        # Shape: (batch_size, qlen, out)
-        question_out = bert_out[:,question_start:question_end]
+        # Shape: (batch_size, qlen, bert_dim)
+        question_end = max(mask[:,1])
+        question_out = bert_out[:,:question_end]
         # Shape: (batch_size, qlen)
-        question_mask = question_mask[:,question_start:question_end]
+        question_mask = question_mask[:,:question_end]
         # Shape: (batch_size, out)
         question_vector = self.summary_vector(question_out, question_mask, False)
 
         passage_out = bert_out
         del bert_out
-        # Shape: (batch_size, out)
+        # Shape: (batch_size, bert_dim)
         passage_vector = self.summary_vector(passage_out, passage_mask)
 
         if len(self.answering_abilities) > 1:

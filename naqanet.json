@@ -134,7 +134,7 @@
                 "num_tokens"
             ]
         ],
-        "batch_size": 16,
+        "batch_size": 10,
         "max_instances_in_memory": 600
     },
     "trainer": {

@@ -6,30 +6,18 @@ from typing import Dict, List, Union, Tuple, Any
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
 from allennlp.data.dataset_readers.reading_comprehension.drop import DropReader
+from allennlp.data.dataset_readers.reading_comprehension.util import split_tokens_by_hyphen
 from allennlp.data.fields import Field, TextField, IndexField, LabelField, ListField, \
                                  MetadataField, SequenceLabelField, SpanField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers.token_indexer import TokenIndexer
 from allennlp.data.token_indexers.wordpiece_indexer import WordpieceIndexer
-from allennlp.data.tokenizers import Token, Tokenizer
+from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
+
 
 from pytorch_pretrained_bert import BertTokenizer
 
-from .nhelpers import tokenlist_to_passage
-
-def get_answer_type(answers):
-    types = []
-    if answers['number'] != '':
-        types.append('number')
-    elif len(answers['spans']) > 0:
-        if len(answers['spans']) == 1:
-            types.append('single_span')
-        else:
-            types.append('multiple_span')
-    else:
-        types.append('date')
-    return types
-        
+from drop_nmn.nhelpers import tokenlist_to_passage, get_number_from_word
 
 @Tokenizer.register("bert-drop")
 class BertDropTokenizer(Tokenizer):
@@ -61,14 +49,23 @@ class BertDropReader(DatasetReader):
                  lazy: bool = False,
                  max_pieces: int = 512,
                  answer_type: str = None,
-                 use_validated: bool = True):
+                 use_validated: bool = True,
+                 wordpiece_numbers: bool = False,
+                 number_tokenizer: Tokenizer = None,
+                 custom_word_to_num: bool = False):
         super(BertDropReader, self).__init__(lazy)
         self.tokenizer = tokenizer
         self.token_indexers = token_indexers
         self.max_pieces = max_pieces
         self.answer_type = answer_type
         self.use_validated = use_validated
-        
+        self.wordpiece_numbers = wordpiece_numbers
+        self.number_tokenizer = number_tokenizer or WordTokenizer()
+        if custom_word_to_num:
+            self.word_to_num = get_number_from_word
+        else:
+            self.word_to_num = DropReader.convert_word_to_number
+    
     @overrides
     def _read(self, file_path: str):
         file_path = cached_path(file_path)
@@ -78,23 +75,41 @@ class BertDropReader(DatasetReader):
         instances = []
         for passage_id, passage_info in tqdm(dataset.items()):
             passage_text = passage_info["passage"].strip()
-            passage_tokens = self.tokenizer.tokenize(passage_text)
+            
+            if self.wordpiece_numbers:        
+                word_tokens = split_tokens_by_hyphen(self.number_tokenizer.tokenize(passage_text))
+            else:
+                word_tokens = self.tokenizer.tokenize(passage_text)
+            numbers_in_passage = []
+            number_indices = []
+            passage_tokens = []
+            curr_index = 0
+            for token in word_tokens:
+                number = self.word_to_num(token.text)
+                wordpieces = self.tokenizer.tokenize(token.text)
+                if number is not None:
+                    numbers_in_passage.append(number)
+                    number_indices.append(curr_index)
+                passage_tokens += wordpieces
+                curr_index += len(wordpieces)
             for question_answer in passage_info["qa_pairs"]:
                 question_id = question_answer["query_id"]
                 question_text = question_answer["question"].strip()
                 answer_annotations = []
                 if "answer" in question_answer:
-                    answer_annotations.append(question_answer["answer"])
-                    if self.answer_type is not None and self.answer_type not in get_answer_type(question_answer['answer']):
+                    if self.answer_type is not None and self.answer_type not in self._get_answer_type(question_answer['answer']):
                         continue
+                    answer_annotations.append(question_answer["answer"])
                 if self.use_validated and "validated_answers" in question_answer:
                     answer_annotations += question_answer["validated_answers"]
                 instance = self.text_to_instance(question_text,
                                                  passage_text,
+                                                 passage_tokens,
+                                                 numbers_in_passage,
+                                                 number_indices,
                                                  question_id,
                                                  passage_id,
-                                                 answer_annotations,
-                                                 passage_tokens)
+                                                 answer_annotations)
                 if instance is not None:
                     instances.append(instance)
         return instances
@@ -103,14 +118,15 @@ class BertDropReader(DatasetReader):
     def text_to_instance(self, 
                          question_text: str, 
                          passage_text: str,
+                         passage_tokens: List[Token],
+                         numbers_in_passage: List[Any],
+                         number_indices: List[int],
                          question_id: str = None, 
                          passage_id: str = None,
                          answer_annotations: List[Dict] = None,
-                         passage_tokens: List[Token] = None) -> Union[Instance, None]:
+                         ) -> Union[Instance, None]:
         # Tokenize question and passage
         question_tokens = self.tokenizer.tokenize(question_text)
-        if not passage_tokens:
-            passage_tokens = self.tokenizer.tokenize(passage_text)
         qlen = len(question_tokens)
         plen = len(passage_tokens)
         
@@ -118,18 +134,12 @@ class BertDropReader(DatasetReader):
         if len(question_passage_tokens) > self.max_pieces - 1:
             question_passage_tokens = question_passage_tokens[:self.max_pieces - 1]
             passage_tokens = passage_tokens[:self.max_pieces - qlen - 3]
+            plen = len(passage_tokens)
+            number_indices, numbers_in_passage= self._clipped_passage_num(number_indices, numbers_in_passage, plen)
+            
         question_passage_tokens += [Token('[SEP]')]
-        
-        # Get all the numbers in the passage
-        numbers_in_passage = []
-        number_indices = []
-        for token_index, token in enumerate(passage_tokens):
-            number = DropReader.convert_word_to_number(token.text)
-            if number is not None:
-                numbers_in_passage.append(number)
-                number_indices.append(token_index + qlen + 2)
-        numbers_in_passage.append(0)
-        number_indices.append(-1)
+        number_indices = [index + qlen + 2 for index in number_indices] + [-1]
+        numbers_in_passage = numbers_in_passage + [0]
         number_tokens = [Token(str(number)) for number in numbers_in_passage]
         
         mask_indices = [0, qlen + 1, len(question_passage_tokens) - 1]
@@ -184,7 +194,7 @@ class BertDropReader(DatasetReader):
             # Get target numbers
             target_numbers = []
             for answer_text in answer_texts:
-                number = DropReader.convert_word_to_number(answer_text)
+                number = self.word_to_num(answer_text)
                 if number is not None:
                     target_numbers.append(number)
 
@@ -233,3 +243,29 @@ class BertDropReader(DatasetReader):
         fields["metadata"] = MetadataField(metadata)
         
         return Instance(fields)
+    
+    def _get_answer_type(self, answers):
+        types = []
+        if answers['number'] != '':
+            types.append('number')
+        elif len(answers['spans']) > 0:
+            if len(answers['spans']) == 1:
+                types.append('single_span')
+            else:
+                types.append('multiple_span')
+        else:
+            types.append('date')
+        return types
+    
+    def _clipped_passage_num(self, number_indices, numbers_in_passage, plen):
+        if number_indices[-1] < plen:
+            return number_indices, numbers_in_passage
+        lo = 0
+        hi = len(number_indices) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if number_indices[mid] < plen:
+                lo = mid + 1
+            else:
+                hi = mid
+        return number_indices[:lo], numbers_in_passage[:lo]

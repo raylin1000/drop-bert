@@ -1,5 +1,6 @@
 from namedtensor import NamedTensor, ntorch
-
+import string
+from word2number.w2n import word_to_num
 
 def repeat(tensor, dims_sizes):
     names = tensor._schema._names
@@ -96,3 +97,20 @@ def tokenlist_to_passage(token_text):
     if string[0] == " ":
         string = string[1:]
     return string
+
+def get_number_from_word(word):
+    punctruations = string.punctuation.replace('-', '')
+    word = word.strip(punctruations)
+    word = word.replace(",", "")
+    try:
+        number = word_to_num(word)
+    except ValueError:
+        try:
+            number = int(word)
+        except ValueError:
+            try:
+                number = float(word)
+            except ValueError:
+                number = None
+    return number
+

@@ -80,7 +80,7 @@ class NumericallyAugmentedBERT(Model):
                 self._ability_ff(bert_dim, bert_dim, 10)
 
         self._drop_metrics = DropEmAndF1()
-        self.device = torch.cuda.current_device() # torch.device('cpu')
+        self.device = torch.cuda.current_device()  # torch.device('cpu')
         initializer(self)
 
     def summary_vector(self, encoding, mask, passage = True):
@@ -127,7 +127,7 @@ class NumericallyAugmentedBERT(Model):
         mask = mask_indices.squeeze(-1)
         # Shape: (batch_size, seqlen)
         cls_sep_mask = \
-            torch.ones(pad_mask.shape).to(self.device).long().scatter(1, mask, torch.zeros(mask.shape).to(self.device).long())
+            torch.ones(pad_mask.shape, device=self.device).long().scatter(1, mask, torch.zeros(mask.shape, device=self.device).long())
         # Shape: (batch_size, seqlen)
         passage_mask = seqlen_ids * pad_mask * cls_sep_mask
         # Shape: (batch_size, seqlen)

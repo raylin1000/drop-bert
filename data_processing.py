@@ -164,7 +164,8 @@ class BertDropReader(DatasetReader):
         fields["question_passage"] = question_passage_field
        
         number_token_indices = \
-            [ArrayField(np.arange(start_ind, start_ind + number_len[i])) for i, start_ind in enumerate(number_indices)]
+            [ArrayField(np.arange(start_ind, start_ind + number_len[i]), padding_value=-1) 
+             for i, start_ind in enumerate(number_indices)]
         fields["number_indices"] = ListField(number_token_indices)
         numbers_in_passage_field = TextField(number_tokens, self.token_indexers)
         mask_index_fields: List[Field] = [IndexField(index, question_passage_field) for index in mask_indices]

@@ -55,6 +55,7 @@ class NumericallyAugmentedBERT(Model):
 
         self._passage_weights_predictor = torch.nn.Linear(bert_dim, 1)
         self._question_weights_predictor = torch.nn.Linear(bert_dim, 1)
+        self._number_weights_predictor = torch.nn.Linear(bert_dim, 1)
         
         if len(self.answering_abilities) > 1:
             self._answer_ability_predictor = \
@@ -92,16 +93,21 @@ class NumericallyAugmentedBERT(Model):
         self.device = torch.cuda.current_device()  # torch.device('cpu')
         initializer(self)
 
-    def summary_vector(self, encoding, mask, passage = True):
-        if passage:
+    def summary_vector(self, encoding, mask, in_type = "passage"):
+        if in_type == "passage":
             # Shape: (batch_size, seqlen)
             alpha = self._passage_weights_predictor(encoding).squeeze()
-        else:
+        elif in_type == "question":
             # Shape: (batch_size, seqlen)
             alpha = self._question_weights_predictor(encoding).squeeze()
-        # Shape: (batch_size, seqlen)
+        else:
+            # Shape: (batch_size, #num of numbers, seqlen)
+            alpha = self._number_weights_predictor(encoding).squeeze()
+        # Shape: (batch_size, seqlen) 
+        # (batch_size, #num of numbers, seqlen) for numbers
         alpha = masked_softmax(alpha, mask)
         # Shape: (batch_size, out)
+        # (batch_size, #num of numbers, out) for numbers
         h = util.weighted_sum(encoding, alpha)
         return h
     
@@ -191,7 +197,7 @@ class NumericallyAugmentedBERT(Model):
         # Shape: (batch_size, qlen)
         question_mask = question_mask[:,:question_end]
         # Shape: (batch_size, out)
-        question_vector = self.summary_vector(question_out, question_mask, False)
+        question_vector = self.summary_vector(question_out, question_mask, "question")
 
         passage_out = bert_out
         del bert_out
@@ -281,24 +287,27 @@ class NumericallyAugmentedBERT(Model):
 
         if "addition_subtraction" in self.answering_abilities:
             # Shape: (batch_size, # of numbers in the passage)
-            number_indices = number_indices[:,:,0].long()
-            number_mask = (number_indices != -1).long()
-            clamped_number_indices = util.replace_masked_values(number_indices, number_mask, 0)
+            number_mask = number_indices[:,:,0] != -1
             
-            # num_mask_indices: (batch_size, # of numbers, # of pieces)
-            # number_indices: (batch_size, # of numbers)
-            # passage_out: (batch_size, seqlen, encoding_dim)
+            # Shape: (batch_size, # of numbers, # of pieces) 
+            number_indices = util.replace_masked_values(number_indices, number_indices != -1, 0).long()
+    
+            batch_size = number_indices.shape[0]
+            num_numbers = number_indices.shape[1]
+            seqlen = passage_out.shape[1]
             
-            # passage_out.dot(mask): (batch_size, # of numbers, bert_dim)
-            # sum(mask): (batch_size, # of numbers)
-            # paassage_out.dot(mask) / sum(mask): (batch_size, # of numbers, bert_dim)
+            # Shape : (batch_size, # of numbers, seqlen)
+            mask = torch.zeros((batch_size,num_numbers, seqlen), device=number_indices.device).long().scatter(\
+                        2, number_indices, torch.ones(number_indices.shape, device=number_indices.device).long())
+            mask[:,:,0] = 0
+            
+            # Shape : (batch_size, # of numbers, seqlen, bert_dim)
+            epassage_out = passage_out.unsqueeze(1).repeat(1,num_numbers,1,1)
+            
+            # Shape : (batch_size, # of numbers, bert_dim)
+            encoded_numbers = self.summary_vector(epassage_out, mask, "numbers")
 
-            # Shape: (batch_size, # of numbers in the passage, encoding_dim)
-            encoded_numbers = torch.gather(
-                    passage_out,
-                    1,
-                    clamped_number_indices.unsqueeze(-1).expand(-1, -1, passage_out.size(-1)))
-            # Shape: (batch_size, # of numbers in the passage, 2 * bert_dim)
+            # Shape: (batch_size, # of numbers, 2*bert_dim)
             encoded_numbers = torch.cat(
                     [encoded_numbers, passage_vector.unsqueeze(1).repeat(1, encoded_numbers.size(1), 1)], -1)
 
@@ -456,7 +465,9 @@ class NumericallyAugmentedBERT(Model):
                 # We did not consider multi-mention answers here
                 if predicted_ability_str == "passage_span_extraction":
                     answer_json["answer_type"] = "passage_span"
-                    num_spans = best_num_passage_span[i]
+                    num_spans = 1
+                    if self.multi_span:
+                        num_spans = best_num_passage_span[i]
                     predicted_answers = []
                     predicted_spans = []
                     for j in range(num_spans):
@@ -470,7 +481,9 @@ class NumericallyAugmentedBERT(Model):
                     answer_json["spans"] = predicted_spans
                 elif predicted_ability_str == "question_span_extraction":
                     answer_json["answer_type"] = "question_span"
-                    num_spans = best_num_question_span[i]
+                    num_spans = 1
+                    if self.multi_span:
+                        num_spans = best_num_question_span[i]
                     predicted_answers = []
                     predicted_spans = []
                     for j in range(num_spans):
@@ -492,7 +505,7 @@ class NumericallyAugmentedBERT(Model):
                     answer_json['numbers'] = []
                     for value, sign in zip(original_numbers, predicted_signs):
                         answer_json['numbers'].append({'value': value, 'sign': sign})
-                    if number_indices[i][-1] == -1:
+                    if number_indices[i][-1][0] == -1:
                         # There is a dummy 0 number at position -1 added in some cases; we are
                         # removing that here.
                         answer_json["numbers"].pop()

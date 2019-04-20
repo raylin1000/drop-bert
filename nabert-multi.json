@@ -19,7 +19,8 @@
     "model": {
         "type": "nabert",
         "bert_pretrained_model": "bert-base-uncased",
-        "dropout_prob": 0.1
+        "dropout_prob": 0.1,
+        "multi_span": true
     },
     "iterator": {
         "type": "basic",

@@ -103,6 +103,7 @@ class NumericallyAugmentedBERT(Model):
         else:
             # Shape: (batch_size, #num of numbers, seqlen)
             alpha = self._number_weights_predictor(encoding).squeeze()
+#             alpha = torch.zeros(encoding.shape[:-1], device=encoding.device)
         # Shape: (batch_size, seqlen) 
         # (batch_size, #num of numbers, seqlen) for numbers
         alpha = masked_softmax(alpha, mask)
@@ -286,6 +287,7 @@ class NumericallyAugmentedBERT(Model):
                 self.get_best_span(question_span_start_logits, question_span_end_logits, max_best_num_question_span)
 
         if "addition_subtraction" in self.answering_abilities:
+            
             # Shape: (batch_size, # of numbers in the passage)
             number_mask = number_indices[:,:,0] != -1
             
@@ -306,6 +308,18 @@ class NumericallyAugmentedBERT(Model):
             
             # Shape : (batch_size, # of numbers, bert_dim)
             encoded_numbers = self.summary_vector(epassage_out, mask, "numbers")
+            
+            
+            """
+            number_indices = number_indices[:,:,0].long()
+            number_mask = (number_indices != -1).long()
+            clamped_number_indices = util.replace_masked_values(number_indices, number_mask, 0)
+            encoded_numbers = torch.gather(
+                    passage_out,
+                    1,
+                    clamped_number_indices.unsqueeze(-1).expand(-1, -1, passage_out.size(-1)))
+            """
+            
 
             # Shape: (batch_size, # of numbers, 2*bert_dim)
             encoded_numbers = torch.cat(

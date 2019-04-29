@@ -51,6 +51,7 @@ class BertDropReader(DatasetReader):
                  max_pieces: int = 512,
                  max_count: int = 10,
                  max_spans: int = 10,
+                 max_numbers_expression: int = 2,
                  answer_type: List[str] = None,
                  use_validated: bool = True,
                  wordpiece_numbers: bool = True,
@@ -62,6 +63,7 @@ class BertDropReader(DatasetReader):
         self.max_pieces = max_pieces
         self.max_count = max_count
         self.max_spans = max_spans
+        self.max_numbers_expression = max_numbers_expression
         self.answer_type = answer_type
         self.use_validated = use_validated
         self.wordpiece_numbers = wordpiece_numbers
@@ -87,6 +89,7 @@ class BertDropReader(DatasetReader):
                 word_tokens = self.tokenizer.tokenize(passage_text)
             numbers_in_passage = []
             number_indices = []
+            number_words = []
             number_len = []
             passage_tokens = []
             curr_index = 0
@@ -97,6 +100,7 @@ class BertDropReader(DatasetReader):
                 if number is not None:
                     numbers_in_passage.append(number)
                     number_indices.append(curr_index)
+                    number_words.append(token.text)
                     number_len.append(num_wordpieces)
                 passage_tokens += wordpieces
                 curr_index += num_wordpieces
@@ -114,6 +118,7 @@ class BertDropReader(DatasetReader):
                                                  passage_text,
                                                  passage_tokens,
                                                  numbers_in_passage,
+                                                 number_words,
                                                  number_indices,
                                                  number_len,
                                                  question_id,
@@ -129,6 +134,7 @@ class BertDropReader(DatasetReader):
                          passage_text: str,
                          passage_tokens: List[Token],
                          numbers_in_passage: List[Any],
+                         number_words : List[str],
                          number_indices: List[int],
                          number_len: List[int],
                          question_id: str = None, 
@@ -175,6 +181,7 @@ class BertDropReader(DatasetReader):
         metadata = {"original_passage": passage_text,
                     "original_question": question_text,
                     "original_numbers": numbers_in_passage,
+                    "original_number_words": number_words,
                     "passage_tokens": passage_tokens,
                     "question_tokens": question_tokens,
                     "question_passage_tokens": question_passage_tokens,
@@ -218,7 +225,8 @@ class BertDropReader(DatasetReader):
             # Get possible ways to arrive at target numbers with add/sub        
             valid_signs_for_add_sub_expressions: List[List[int]] = []
             if answer_type in ["number", "date"]:
-                valid_signs_for_add_sub_expressions = DropReader.find_valid_add_sub_expressions(numbers_in_passage, target_numbers)
+                valid_signs_for_add_sub_expressions = \
+                    DropReader.find_valid_add_sub_expressions(numbers_in_passage, target_numbers, self.max_numbers_expression)
             
             # Get possible ways to arrive at target numbers with counting
             valid_counts: List[int] = []

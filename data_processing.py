@@ -56,7 +56,8 @@ class BertDropReader(DatasetReader):
                  use_validated: bool = True,
                  wordpiece_numbers: bool = True,
                  number_tokenizer: Tokenizer = None,
-                 custom_word_to_num: bool = True):
+                 custom_word_to_num: bool = True,
+                 advanced_exp: bool = False):
         super(BertDropReader, self).__init__(lazy)
         self.tokenizer = tokenizer
         self.token_indexers = token_indexers
@@ -68,6 +69,7 @@ class BertDropReader(DatasetReader):
         self.use_validated = use_validated
         self.wordpiece_numbers = wordpiece_numbers
         self.number_tokenizer = number_tokenizer or WordTokenizer()
+        self.advanced_exp = advanced_exp
         if custom_word_to_num:
             self.word_to_num = get_number_from_word
         else:
@@ -223,9 +225,9 @@ class BertDropReader(DatasetReader):
                     target_numbers.append(number)
 
             # Get possible ways to arrive at target numbers with add/sub        
-            valid_signs_for_add_sub_expressions: List[List[int]] = []
+            valid_expressions: List[List[int]] = []
             if answer_type in ["number", "date"]:
-                valid_signs_for_add_sub_expressions = \
+                valid_expressions = \
                     DropReader.find_valid_add_sub_expressions(numbers_in_passage, target_numbers, self.max_numbers_expression)
             
             # Get possible ways to arrive at target numbers with counting
@@ -238,7 +240,7 @@ class BertDropReader(DatasetReader):
             answer_info = {"answer_passage_spans": valid_passage_spans,
                            "answer_question_spans": valid_question_spans,
                            "num_spans": num_spans,
-                           "signs_for_add_sub_expressions": valid_signs_for_add_sub_expressions,
+                           "expressions": valid_expressions,
                            "counts": valid_counts}
             metadata["answer_info"] = answer_info
         
@@ -254,11 +256,11 @@ class BertDropReader(DatasetReader):
             fields["answer_as_question_spans"] = ListField(question_span_fields)
 
             add_sub_signs_field: List[Field] = []
-            for signs_for_one_add_sub_expressions in valid_signs_for_add_sub_expressions:
+            for signs_for_one_add_sub_expressions in valid_expressions:
                 add_sub_signs_field.append(SequenceLabelField(signs_for_one_add_sub_expressions, numbers_in_passage_field))
             if not add_sub_signs_field:
                 add_sub_signs_field.append(SequenceLabelField([0] * len(number_tokens), numbers_in_passage_field))
-            fields["answer_as_add_sub_expressions"] = ListField(add_sub_signs_field)
+            fields["answer_as_expressions"] = ListField(add_sub_signs_field)
 
             count_fields: List[Field] = [LabelField(count_label, skip_indexing=True) for count_label in valid_counts]
             if not count_fields:

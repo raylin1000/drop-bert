@@ -1,0 +1,38 @@
+{
+    "dataset_reader": {
+        "type": "bert-drop",
+        "tokenizer": {
+            "type": "bert-drop",
+            "pretrained_model": "bert-base-uncased"
+        },
+        "token_indexers": {
+            "tokens": {
+                "type": "bert-drop",
+                "pretrained_model": "bert-base-uncased"
+            }   
+        }
+    },
+    "train_data_path": "data/drop_dataset_dev.json",
+    "validation_data_path": "data/drop_dataset_dev.json",
+    "model": {
+        "type": "nabert+",
+        "bert_pretrained_model": "bert-base-uncased",
+        "dropout_prob": 0.1
+    },
+    "iterator": {
+        "type": "basic",
+        "batch_size": 4
+    },
+    "trainer": {
+        "num_epochs": 20,
+        "patience": 10,
+        "validation_metric": "+f1",
+        "cuda_device": 1,
+        "optimizer": {
+            "type": "bert_adam",
+            "lr": 1e-5
+        },
+        "summary_interval": 100,
+        "keep_serialized_model_every_num_seconds": 3600
+    }
+}

@@ -164,7 +164,7 @@ class NumericallyAugmentedBERT(Model):
                 num_spans: torch.LongTensor = None,
                 answer_as_passage_spans: torch.LongTensor = None,
                 answer_as_question_spans: torch.LongTensor = None,
-                answer_as_add_sub_expressions: torch.LongTensor = None,
+                answer_as_expressions: torch.LongTensor = None,
                 answer_as_counts: torch.LongTensor = None,
                 metadata: List[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
         # pylint: disable=arguments-differ
@@ -338,7 +338,7 @@ class NumericallyAugmentedBERT(Model):
 
         # If answer is given, compute the loss.
         if answer_as_passage_spans is not None or answer_as_question_spans is not None \
-                or answer_as_add_sub_expressions is not None or answer_as_counts is not None:
+                or answer_as_expressions is not None or answer_as_counts is not None:
 
             log_marginal_likelihood_list = []
 
@@ -414,9 +414,9 @@ class NumericallyAugmentedBERT(Model):
                 elif answering_ability == "addition_subtraction":
                     # The padded add-sub combinations use 0 as the signs for all numbers, and we mask them here.
                     # Shape: (batch_size, # of combinations)
-                    gold_add_sub_mask = (answer_as_add_sub_expressions.sum(-1) > 0).float()
+                    gold_add_sub_mask = (answer_as_expressions.sum(-1) > 0).float()
                     # Shape: (batch_size, # of numbers in the passage, # of combinations)
-                    gold_add_sub_signs = answer_as_add_sub_expressions.transpose(1, 2)
+                    gold_add_sub_signs = answer_as_expressions.transpose(1, 2)
                     # Shape: (batch_size, # of numbers in the passage, # of combinations)
                     log_likelihood_for_number_signs = torch.gather(number_sign_log_probs, 2, gold_add_sub_signs)
                     # the log likelihood of the masked positions should be 0
@@ -510,7 +510,7 @@ class NumericallyAugmentedBERT(Model):
                     answer_json["value"] = predicted_answers
                     answer_json["spans"] = predicted_spans
                 elif predicted_ability_str == "addition_subtraction":  # plus_minus combination answer
-                    answer_json["answer_type"] = "arithmetic"
+                    answer_json["answer_type"] = "addition_subtraction"
                     original_numbers = metadata[i]['original_numbers']
                     sign_remap = {0: 0, 1: 1, 2: -1}
                     predicted_signs = [sign_remap[it] for it in best_signs_for_numbers[i].detach().cpu().numpy()]

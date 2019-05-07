@@ -3,6 +3,9 @@ from overrides import overrides
 from tqdm import tqdm
 from typing import Dict, List, Union, Tuple, Any
 import numpy as np
+import operator
+from collections import defaultdict
+from functools import reduce
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
@@ -57,7 +60,8 @@ class BertDropReader(DatasetReader):
                  wordpiece_numbers: bool = True,
                  number_tokenizer: Tokenizer = None,
                  custom_word_to_num: bool = True,
-                 advanced_exp: bool = False):
+                 adv_expr: bool = False,
+                 max_depth: int = 3):
         super(BertDropReader, self).__init__(lazy)
         self.tokenizer = tokenizer
         self.token_indexers = token_indexers
@@ -69,7 +73,10 @@ class BertDropReader(DatasetReader):
         self.use_validated = use_validated
         self.wordpiece_numbers = wordpiece_numbers
         self.number_tokenizer = number_tokenizer or WordTokenizer()
-        self.advanced_exp = advanced_exp
+        self.adv_expr = adv_expr
+        self.max_depth = max_depth
+        self.op_dict = {'+': operator.add, '-': operator.sub, '*': operator.mul, '/': operator.truediv}
+        self.operations = list(enumerate(self.op_dict.keys()))
         if custom_word_to_num:
             self.word_to_num = get_number_from_word
         else:
@@ -95,6 +102,7 @@ class BertDropReader(DatasetReader):
             number_len = []
             passage_tokens = []
             curr_index = 0
+            # Get all passage numbers
             for token in word_tokens:
                 number = self.word_to_num(token.text)
                 wordpieces = self.tokenizer.tokenize(token.text)
@@ -106,6 +114,13 @@ class BertDropReader(DatasetReader):
                     number_len.append(num_wordpieces)
                 passage_tokens += wordpieces
                 curr_index += num_wordpieces
+            
+            # Get all passage expressions
+            expressions = None
+            if self.adv_expr:
+                expressions = self._get_exp(list(enumerate([100] + numbers_in_passage)))
+            
+            # Process questions from this passage
             for question_answer in passage_info["qa_pairs"]:
                 question_id = question_answer["query_id"]
                 question_text = question_answer["question"].strip()
@@ -125,7 +140,8 @@ class BertDropReader(DatasetReader):
                                                  number_len,
                                                  question_id,
                                                  passage_id,
-                                                 answer_annotations)
+                                                 answer_annotations,
+                                                 expressions)
                 if instance is not None:
                     instances.append(instance)
         return instances
@@ -142,6 +158,7 @@ class BertDropReader(DatasetReader):
                          question_id: str = None, 
                          passage_id: str = None,
                          answer_annotations: List[Dict] = None,
+                         expressions: Dict[Any, Any] = None
                          ) -> Union[Instance, None]:
         # Tokenize question and passage
         question_tokens = self.tokenizer.tokenize(question_text)
@@ -223,12 +240,25 @@ class BertDropReader(DatasetReader):
                 number = self.word_to_num(answer_text)
                 if number is not None:
                     target_numbers.append(number)
-
+            
             # Get possible ways to arrive at target numbers with add/sub        
+            
             valid_expressions: List[List[int]] = []
+            exp = None
             if answer_type in ["number", "date"]:
-                valid_expressions = \
-                    DropReader.find_valid_add_sub_expressions(numbers_in_passage, target_numbers, self.max_numbers_expression)
+                if self.adv_expr:
+                    exp = []
+                    target_exp = [expressions[num] for num in target_numbers]
+                    zipped = list(zip(*target_exp))
+                    if zipped:
+                        valid_expressions = sum(list(zipped[0]), [])
+                        exp = sum(list(zipped[1]), [])
+                else:
+                    valid_expressions = \
+                        DropReader.find_valid_add_sub_expressions(numbers_in_passage, 
+                                                                  target_numbers, 
+                                                                  self.max_numbers_expression)
+                
             
             # Get possible ways to arrive at target numbers with counting
             valid_counts: List[int] = []
@@ -242,6 +272,8 @@ class BertDropReader(DatasetReader):
                            "num_spans": num_spans,
                            "expressions": valid_expressions,
                            "counts": valid_counts}
+            if self.adv_expr:
+                answer_info['expr_text'] = exp
             metadata["answer_info"] = answer_info
         
             # Add answer fields
@@ -254,13 +286,20 @@ class BertDropReader(DatasetReader):
             if not question_span_fields:
                 question_span_fields.append(SpanField(-1, -1, question_passage_field))
             fields["answer_as_question_spans"] = ListField(question_span_fields)
-
-            add_sub_signs_field: List[Field] = []
-            for signs_for_one_add_sub_expressions in valid_expressions:
-                add_sub_signs_field.append(SequenceLabelField(signs_for_one_add_sub_expressions, numbers_in_passage_field))
-            if not add_sub_signs_field:
-                add_sub_signs_field.append(SequenceLabelField([0] * len(number_tokens), numbers_in_passage_field))
-            fields["answer_as_expressions"] = ListField(add_sub_signs_field)
+            
+            if not self.adv_expr:
+                add_sub_signs_field: List[Field] = []
+                for signs_for_one_add_sub_expressions in valid_expressions:
+                    add_sub_signs_field.append(SequenceLabelField(signs_for_one_add_sub_expressions, numbers_in_passage_field))
+                if not add_sub_signs_field:
+                    add_sub_signs_field.append(SequenceLabelField([0] * len(number_tokens), numbers_in_passage_field))
+                fields["answer_as_expressions"] = ListField(add_sub_signs_field)
+            else:
+                expression_indices = \
+                    [ArrayField(np.array(expression), padding_value=-1) for expression in valid_expressions]
+                if not expression_indices:
+                    expression_indices = [ArrayField(np.array([-1]), padding_value=-1)]
+                fields["answer_as_expressions"] = ListField(expression_indices)
 
             count_fields: List[Field] = [LabelField(count_label, skip_indexing=True) for count_label in valid_counts]
             if not count_fields:
@@ -297,3 +336,42 @@ class BertDropReader(DatasetReader):
         if number_indices[lo - 1] + number_len[lo - 1] > plen:
             number_len[lo - 1] = plen - number_indices[lo - 1]
         return number_indices[:lo], number_len[:lo], numbers_in_passage[:lo]
+    
+    def _get_exp(self, numbers):
+        num_ops = len(self.operations)
+        target_to_exp = defaultdict(list)
+        for depth in range(2, self.max_depth + 1):
+            stack = [([], set(), 0, 0, [])]
+            while stack:
+                exp, used_nums, num_num, num_op, eval_stack = stack.pop()
+                # Expression complete
+                if len(exp) == 2 * depth - 1:
+                    target_to_exp[eval_stack[0]].append(exp)
+                
+                # Can add num
+                if num_num < depth:
+                    for num in numbers:
+                        if num not in used_nums:
+                            num = (num[0] + num_ops, num[1])
+                            new_exp = exp + [num]
+                            new_used_nums = used_nums.copy()
+                            new_used_nums.add(num)
+                            new_eval_stack = eval_stack + [num[1]]
+                            stack.append((new_exp, new_used_nums, num_num + 1, num_op, new_eval_stack))
+                                                
+                # Can add op
+                if num_op < depth - 1 and len(eval_stack) >= 2:
+                    for op in self.operations:
+                        try:
+                            result = self.op_dict[op[1]](eval_stack[-2], eval_stack[-1])
+                            new_exp = exp + [op]
+                            new_eval_stack = eval_stack[:-2] + [result]
+                            stack.append((new_exp, used_nums, num_num, num_op + 1, new_eval_stack))
+                        except ZeroDivisionError:
+                            pass
+        for number in target_to_exp:
+            for ind, exp in enumerate(target_to_exp[number]):
+                zipped = list(zip(*exp))
+                target_to_exp[number][ind] = (list(zipped[0]), ' '.join([str(x) for x in zipped[1]]))
+            target_to_exp[number] = tuple([list(x) for x in zip(*target_to_exp[number])])
+        return target_to_exp

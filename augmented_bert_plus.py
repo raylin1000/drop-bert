@@ -420,10 +420,12 @@ class NumericallyAugmentedBERTPlus(Model):
         log_marginal_likelihood_for_count = util.logsumexp(log_likelihood_for_counts)
         return log_marginal_likelihood_for_count
     
+    
     def _count_prediction(self, best_count_number):
         predicted_count = best_count_number.detach().cpu().numpy()
         predicted_answer = str(predicted_count)
         return predicted_answer, predicted_count
+    
     
     def _base_arithmetic_module(self, passage_vector, passage_out, number_indices, number_mask):
         if self.number_rep in ['average', 'attention']:
@@ -508,7 +510,22 @@ class NumericallyAugmentedBERTPlus(Model):
             # removing that here.
             numbers.pop()
         return predicted_answer, numbers
-
+    
+    
+    def _adv_arithmetic_module(self, passage_vector, passage_out, number_indices, number_mask):
+        pass
+    
+    
+    def _adv_arithmetic_log_likelihood(self,
+                                        answer_as_expressions,
+                                        expression_log_probs,
+                                        number_mask):
+        pass
+    
+    
+    def _adv_arithmetic_prediction(self, original_numbers, number_indices, best_expression):
+        pass
+    
     
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         exact_match, f1_score = self._drop_metrics.get_metric(reset)

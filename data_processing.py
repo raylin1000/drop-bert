@@ -6,6 +6,7 @@ import numpy as np
 import operator
 from collections import defaultdict
 from functools import reduce
+import pickle
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
@@ -22,6 +23,18 @@ from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
 from pytorch_pretrained_bert import BertTokenizer
 
 from drop_nmn.nhelpers import tokenlist_to_passage, get_number_from_word
+
+@Tokenizer.register("pickled")
+class PickleReader(DatasetReader):
+    def __init__(self, lazy: bool = False):
+        super(PickleReader, self).__init__(lazy)
+    
+    @overrides
+    def _read(self, file_path: str):
+        file_path = cached_path(file_path)
+        with open(file_path, 'rb') as dataset_file:
+            instances = pickle.load(dataset_file)
+        return instances
 
 @Tokenizer.register("bert-drop")
 class BertDropTokenizer(Tokenizer):
@@ -42,8 +55,7 @@ class BertDropTokenIndexer(WordpieceIndexer):
                          wordpiece_tokenizer=bert_tokenizer.wordpiece_tokenizer.tokenize,
                          max_pieces=max_pieces,
                          namespace="bert",
-                         separator_token="[SEP]")
-    
+                         separator_token="[SEP]")    
    
 @DatasetReader.register("bert-drop")
 class BertDropReader(DatasetReader):
@@ -346,14 +358,13 @@ class BertDropReader(DatasetReader):
                 exp, used_nums, num_num, num_op, eval_stack = stack.pop()
                 # Expression complete
                 if len(exp) == 2 * depth - 1:
-                    target_to_exp[eval_stack[0]].append(exp)
+                    target_to_exp[eval_stack[0]].append(exp + [(0, '')])
                 
                 # Can add num
                 if num_num < depth:
                     for num in numbers:
                         if num not in used_nums:
-                            num = (num[0] + num_ops, num[1])
-                            new_exp = exp + [num]
+                            new_exp = exp + [(num[0] + num_ops + 1, num[1])]
                             new_used_nums = used_nums.copy()
                             new_used_nums.add(num)
                             new_eval_stack = eval_stack + [num[1]]
@@ -364,7 +375,7 @@ class BertDropReader(DatasetReader):
                     for op in self.operations:
                         try:
                             result = self.op_dict[op[1]](eval_stack[-2], eval_stack[-1])
-                            new_exp = exp + [op]
+                            new_exp = exp + [(op[0] + 1, op[1])]
                             new_eval_stack = eval_stack[:-2] + [result]
                             stack.append((new_exp, used_nums, num_num, num_op + 1, new_eval_stack))
                         except ZeroDivisionError:

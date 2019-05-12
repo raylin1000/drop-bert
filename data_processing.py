@@ -7,6 +7,7 @@ import operator
 from collections import defaultdict
 from functools import reduce
 import pickle
+import os
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
@@ -22,18 +23,19 @@ from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
 
 from pytorch_pretrained_bert import BertTokenizer
 
-from drop_nmn.nhelpers import tokenlist_to_passage, get_number_from_word
+from drop_nmn.nhelpers import *
 
-@Tokenizer.register("pickled")
+@DatasetReader.register("pickled")
 class PickleReader(DatasetReader):
     def __init__(self, lazy: bool = False):
         super(PickleReader, self).__init__(lazy)
     
     @overrides
     def _read(self, file_path: str):
-        file_path = cached_path(file_path)
-        with open(file_path, 'rb') as dataset_file:
-            instances = pickle.load(dataset_file)
+        instances = []
+        for part in tqdm(os.listdir(file_path)):
+            with open(os.path.join(file_path, part), 'rb') as dataset_file:
+                instances += pickle.load(dataset_file)
         return instances
 
 @Tokenizer.register("bert-drop")
@@ -130,7 +132,10 @@ class BertDropReader(DatasetReader):
             # Get all passage expressions
             expressions = None
             if self.adv_expr:
-                expressions = self._get_exp(list(enumerate([100] + numbers_in_passage)))
+                expressions = self.get_exp(list(enumerate([100] + numbers_in_passage)),
+                                           self.operations,
+                                           self.op_dict,
+                                           self.max_depth)
             
             # Process questions from this passage
             for question_answer in passage_info["qa_pairs"]:
@@ -138,7 +143,7 @@ class BertDropReader(DatasetReader):
                 question_text = question_answer["question"].strip()
                 answer_annotations = []
                 if "answer" in question_answer:
-                    if self.answer_type is not None and self._get_answer_type(question_answer['answer']) not in self.answer_type:
+                    if self.answer_type is not None and get_answer_type(question_answer['answer']) not in self.answer_type:
                         continue
                     answer_annotations.append(question_answer["answer"])
                 if self.use_validated and "validated_answers" in question_answer:
@@ -183,7 +188,7 @@ class BertDropReader(DatasetReader):
             passage_tokens = passage_tokens[:self.max_pieces - qlen - 3]
             plen = len(passage_tokens)
             number_indices, number_len, numbers_in_passage = \
-                self._clipped_passage_num(number_indices, number_len, numbers_in_passage, plen)
+                clipped_passage_num(number_indices, number_len, numbers_in_passage, plen)
         
         question_passage_tokens += [Token('[SEP]')]
         number_indices = [index + qlen + 2 for index in number_indices] + [-1]
@@ -323,66 +328,3 @@ class BertDropReader(DatasetReader):
         fields["metadata"] = MetadataField(metadata)
         
         return Instance(fields)
-    
-    def _get_answer_type(self, answers):
-        if answers['number']:
-            return 'number'
-        elif answers['spans']:
-            if len(answers['spans']) == 1:
-                return 'single_span'
-            return 'multiple_span'
-        elif any(answers['date'].values()):
-            return 'date'
-    
-    def _clipped_passage_num(self, number_indices, number_len, numbers_in_passage, plen):
-        if number_indices[-1] < plen:
-            return number_indices, number_len, numbers_in_passage
-        lo = 0
-        hi = len(number_indices) - 1
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if number_indices[mid] < plen:
-                lo = mid + 1
-            else:
-                hi = mid
-        if number_indices[lo - 1] + number_len[lo - 1] > plen:
-            number_len[lo - 1] = plen - number_indices[lo - 1]
-        return number_indices[:lo], number_len[:lo], numbers_in_passage[:lo]
-    
-    def _get_exp(self, numbers):
-        num_ops = len(self.operations)
-        target_to_exp = defaultdict(list)
-        for depth in range(2, self.max_depth + 1):
-            stack = [([], set(), 0, 0, [])]
-            while stack:
-                exp, used_nums, num_num, num_op, eval_stack = stack.pop()
-                # Expression complete
-                if len(exp) == 2 * depth - 1:
-                    target_to_exp[eval_stack[0]].append(exp + [(0, '')])
-                
-                # Can add num
-                if num_num < depth:
-                    for num in numbers:
-                        if num not in used_nums:
-                            new_exp = exp + [(num[0] + num_ops + 1, num[1])]
-                            new_used_nums = used_nums.copy()
-                            new_used_nums.add(num)
-                            new_eval_stack = eval_stack + [num[1]]
-                            stack.append((new_exp, new_used_nums, num_num + 1, num_op, new_eval_stack))
-                                                
-                # Can add op
-                if num_op < depth - 1 and len(eval_stack) >= 2:
-                    for op in self.operations:
-                        try:
-                            result = self.op_dict[op[1]](eval_stack[-2], eval_stack[-1])
-                            new_exp = exp + [(op[0] + 1, op[1])]
-                            new_eval_stack = eval_stack[:-2] + [result]
-                            stack.append((new_exp, used_nums, num_num, num_op + 1, new_eval_stack))
-                        except ZeroDivisionError:
-                            pass
-        for number in target_to_exp:
-            for ind, exp in enumerate(target_to_exp[number]):
-                zipped = list(zip(*exp))
-                target_to_exp[number][ind] = (list(zipped[0]), ' '.join([str(x) for x in zipped[1]]))
-            target_to_exp[number] = tuple([list(x) for x in zip(*target_to_exp[number])])
-        return target_to_exp

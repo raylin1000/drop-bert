@@ -10,9 +10,9 @@ from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.nn.util import masked_softmax
 from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
 from pytorch_pretrained_bert import BertModel, BertTokenizer
+import pickle
 
-
-from drop_nmn.nhelpers import tokenlist_to_passage
+from drop_nmn.nhelpers import tokenlist_to_passage, beam_search, evaluate_postfix
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,9 @@ class NumericallyAugmentedBERTPlus(Model):
         super().__init__(vocab, regularizer)
 
         if answering_abilities is None:
-            self.answering_abilities = ["passage_span_extraction", "question_span_extraction",
-                                        "arithmetic", "counting"]
+#             self.answering_abilities = ["passage_span_extraction", "question_span_extraction",
+#                                         "arithmetic", "counting"]
+            self.answering_abilities = ["arithmetic"]
         else:
             self.answering_abilities = answering_abilities
         self.number_rep = number_rep
@@ -50,23 +51,18 @@ class NumericallyAugmentedBERTPlus(Model):
         self._passage_weights_predictor = torch.nn.Linear(bert_dim, 1)
         self._question_weights_predictor = torch.nn.Linear(bert_dim, 1)
         self._number_weights_predictor = torch.nn.Linear(bert_dim, 1)
-        
+        self._arithmetic_weights_predictor = torch.nn.Linear(bert_dim, 1)
+            
         if len(self.answering_abilities) > 1:
             self._answer_ability_predictor = \
                 self.ff(2 * bert_dim, bert_dim, len(self.answering_abilities))
 
         if "passage_span_extraction" in self.answering_abilities:
-            if self.multi_span:
-                self._num_passage_span_predictor = \
-                    self.ff(2 * bert_dim, bert_dim, max_spans + 1)
             self._passage_span_extraction_index = self.answering_abilities.index("passage_span_extraction")
             self._passage_span_start_predictor = torch.nn.Linear(bert_dim, 1)
             self._passage_span_end_predictor = torch.nn.Linear(bert_dim, 1)
 
         if "question_span_extraction" in self.answering_abilities:
-            if self.multi_span:
-                self._num_question_span_predictor = \
-                    self.ff(2 * bert_dim, bert_dim, max_spans + 1)
             self._question_span_extraction_index = self.answering_abilities.index("question_span_extraction")
             self._question_span_start_predictor = \
                 self.ff(2 * bert_dim, bert_dim, 1)
@@ -75,8 +71,9 @@ class NumericallyAugmentedBERTPlus(Model):
 
         if "arithmetic" in self.answering_abilities:
             self._arithmetic_index = self.answering_abilities.index("arithmetic")
-            self._number_sign_predictor = \
-                self.ff(2 * bert_dim, bert_dim, 3)
+#             self._number_sign_predictor = \
+#                 self.ff(2 * bert_dim, bert_dim, 3)
+            self.init_arithmetic(bert_dim, bert_dim, bert_dim, layers=2, dropout=dropout_prob)
 
         if "counting" in self.answering_abilities:
             self._counting_index = self.answering_abilities.index("counting")
@@ -93,6 +90,9 @@ class NumericallyAugmentedBERTPlus(Model):
         elif in_type == "question":
             # Shape: (batch_size, seqlen)
             alpha = self._question_weights_predictor(encoding).squeeze()
+        elif in_type == "arithmetic":
+            # Shape: (batch_size, seqlen)
+            alpha = self._arithmetic_weights_predictor(encoding).squeeze()
         else:
             # Shape: (batch_size, #num of numbers, seqlen)
             alpha = torch.zeros(encoding.shape[:-1], device=encoding.device)
@@ -111,6 +111,27 @@ class NumericallyAugmentedBERTPlus(Model):
                                    torch.nn.ReLU(),
                                    torch.nn.Dropout(self.dropout),
                                    torch.nn.Linear(hidden_dim, output_dim))
+    
+    def init_arithmetic(self, bert_dim, input_dim=300, rnn_hidden_dim=500, layers=1, dropout=0.3):
+        lstm_args = {'input_size' : input_dim, 'hidden_size' : rnn_hidden_dim, 'num_layers' : layers, 'batch_first' : True,
+                    'dropout':dropout}
+        self.rnn = torch.nn.LSTM(**lstm_args)
+        self.rnndropout = torch.nn.Dropout(dropout)  
+        
+        self.Wst = torch.nn.Linear(rnn_hidden_dim, bert_dim)
+        self.Wo = torch.nn.Linear(bert_dim, bert_dim)
+        self.Wc = torch.nn.Linear(bert_dim, bert_dim)
+        
+        self.Wcon = torch.nn.Linear(bert_dim, bert_dim)
+        
+        self.arith_criterion = torch.nn.CrossEntropyLoss(ignore_index=-1, reduction="none")
+        
+        self.max_explen = 10
+        self.num_ops = 5
+        self.arithmetic_K = 5
+        self.op_embeddings = torch.nn.Embedding(self.num_ops + 1,bert_dim)
+        self.ops = ["END", "+", "-", "*", "/", "100"]
+        self.END = 0
 
     def forward(self,  # type: ignore
                 question_passage: Dict[str, torch.LongTensor],
@@ -123,7 +144,11 @@ class NumericallyAugmentedBERTPlus(Model):
                 answer_as_counts: torch.LongTensor = None,
                 metadata: List[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
         # pylint: disable=arguments-differ
-        
+#         out = {"question_passage":question_passage, "number_indices":number_indices,"mask_indices":mask_indices,
+#                "answer_as_passage_spans":answer_as_passage_spans,"answer_as_question_spans":answer_as_question_spans,
+#                "answer_as_expressions":answer_as_expressions,"answer_as_counts":answer_as_counts,"metadata":metadata}
+#         pickle.dump(out , open( "save.p", "wb" ) )
+#         torch.save(self.state_dict(), "state_dict.th")
         # Shape: (batch_size, seqlen)
         question_passage_tokens = question_passage["tokens"]
         # Shape: (batch_size, seqlen)
@@ -146,7 +171,6 @@ class NumericallyAugmentedBERTPlus(Model):
         
         # Shape: (batch_size, seqlen, bert_dim)
         bert_out, _ = self.BERT(question_passage_tokens, seqlen_ids, pad_mask, output_all_encoded_layers=False)
-
         # Shape: (batch_size, qlen, bert_dim)
         question_end = max(mask[:,1])
         question_out = bert_out[:,:question_end]
@@ -154,14 +178,31 @@ class NumericallyAugmentedBERTPlus(Model):
         question_mask = question_mask[:,:question_end]
         # Shape: (batch_size, out)
         question_vector = self.summary_vector(question_out, question_mask, "question")
-            
+        
+#         arithmetic_summary = self.summary_vector(question_out, question_mask, "arithmetic")
+        
         passage_out = bert_out
         del bert_out
         # Shape: (batch_size, bert_dim)
         passage_vector = self.summary_vector(passage_out, passage_mask)
+        arithmetic_summary = self.summary_vector(passage_out, pad_mask, "arithmetic")
         
-        # Shape: (batch_size, # of numbers in the passage)
-        number_mask = number_indices[:,:,0] != -1
+        if "arithmetic" in self.answering_abilities:
+            # Shape: (batch_size, # of numbers in the passage)
+            if number_indices.dim() == 3:
+                number_indices = number_indices[:,:,0].long()
+            number_mask = (number_indices != -1).long()
+            clamped_number_indices = util.replace_masked_values(number_indices, number_mask, 0)
+            encoded_numbers = torch.gather(
+                    passage_out,
+                    1,
+                    clamped_number_indices.unsqueeze(-1).expand(-1, -1, passage_out.size(-1)))
+            op_mask = torch.ones((batch_size,self.num_ops + 1),device=number_mask.device).long()
+            options_mask = torch.cat([op_mask, number_mask], -1)
+            ops = self.op_embeddings(torch.arange(self.num_ops + 1, device=number_mask.device).expand(batch_size,-1))
+#             options = torch.cat([ops, encoded_numbers], 1)
+            options = torch.cat([self.Wo(ops), self.Wc(encoded_numbers)], 1)
+#             options = (ops, encoded_numbers)
 
         if len(self.answering_abilities) > 1:
             # Shape: (batch_size, number_of_abilities)
@@ -182,11 +223,24 @@ class NumericallyAugmentedBERTPlus(Model):
                 self._question_span_module(passage_vector, question_out, question_mask)
             
         if "arithmetic" in self.answering_abilities:
-            number_sign_log_probs, best_signs_for_numbers = \
-                self._base_arithmetic_module(passage_vector, passage_out, number_indices, number_mask)
-
+            arithmetic_logits, best_expression = \
+                self._adv_arithmetic_module(arithmetic_summary, self.max_explen, options, options_mask, \
+                                               passage_out, pad_mask)
+            shapes = arithmetic_logits.shape
+            if (1-(arithmetic_logits != arithmetic_logits)).sum() != (shapes[0]*shapes[1]*shapes[2]):
+#                 out = {"question_passage":question_passage, "number_indices":number_indices,"mask_indices":mask_indices,
+#                        "answer_as_passage_spans":answer_as_passage_spans,"answer_as_question_spans":answer_as_question_spans,
+#                        "answer_as_expressions":answer_as_expressions,"answer_as_counts":answer_as_counts,"metadata":metadata, 
+#                        "lp":arithmetic_logits, "s":arithmetic_summary, "options":options, "options_mask":options_mask, 
+#                       "passage_out":passage_out, "pad_mask":pad_mask}
+#                 pickle.dump(out , open( "save4.p", "wb" ) )
+#                 torch.save(self.state_dict(), "state_dict4.th")
+                print("bad logits")
+                arithmetic_logits = torch.rand(shapes, device = arithmetic_logits.device, requires_grad = True)
+#             number_sign_log_probs, best_signs_for_numbers = \
+#                 self._base_arithmetic_module(passage_vector, passage_out, number_indices, number_mask)
         output_dict = {}
-
+        del passage_out, question_out
         # If answer is given, compute the loss.
         if answer_as_passage_spans is not None or answer_as_question_spans is not None \
                 or answer_as_expressions is not None or answer_as_counts is not None:
@@ -209,10 +263,17 @@ class NumericallyAugmentedBERTPlus(Model):
                     log_marginal_likelihood_list.append(log_marginal_likelihood_for_question_span)
 
                 elif answering_ability == "arithmetic":
+#                     log_marginal_likelihood_for_arithmetic = \
+#                         self._base_arithmetic_log_likelihood(answer_as_expressions,
+#                                                              number_sign_log_probs,
+#                                                              number_mask)
+                    max_explen = answer_as_expressions.shape[-1]
+    
+                    possible_exps = answer_as_expressions.shape[1]
+                    limit = min(possible_exps, 1000)
                     log_marginal_likelihood_for_arithmetic = \
-                        self._base_arithmetic_log_likelihood(answer_as_expressions,
-                                                             number_sign_log_probs,
-                                                             number_mask)
+                        self._adv_arithmetic_log_likelihood(arithmetic_logits[:,:max_explen,:], 
+                                                            answer_as_expressions[:,:limit,:].long())
                     log_marginal_likelihood_list.append(log_marginal_likelihood_for_arithmetic)
 
                 elif answering_ability == "counting":
@@ -231,51 +292,58 @@ class NumericallyAugmentedBERTPlus(Model):
                 marginal_log_likelihood = util.logsumexp(all_log_marginal_likelihoods)
             else:
                 marginal_log_likelihood = log_marginal_likelihood_list[0]
-
+        
             output_dict["loss"] = - marginal_log_likelihood.mean()
+        with torch.no_grad():
+            # Compute the metrics and add the tokenized input to the output.
+            if metadata is not None:
+                output_dict["question_id"] = []
+                output_dict["answer"] = []
+                question_tokens = []
+                passage_tokens = []
+                for i in range(batch_size):
+    #                 question_tokens.append(metadata[i]['question_tokens'])
+    #                 passage_tokens.append(metadata[i]['passage_tokens'])
+                    if len(self.answering_abilities) > 1:
+                        predicted_ability_str = self.answering_abilities[best_answer_ability[i]]
+                    else:
+                        predicted_ability_str = self.answering_abilities[0]
+                    answer_json: Dict[str, Any] = {}
 
-        # Compute the metrics and add the tokenized input to the output.
-        if metadata is not None:
-            output_dict["question_id"] = []
-            output_dict["answer"] = []
-            question_tokens = []
-            passage_tokens = []
-            for i in range(batch_size):
-                question_tokens.append(metadata[i]['question_tokens'])
-                passage_tokens.append(metadata[i]['passage_tokens'])
+                    # We did not consider multi-mention answers here
+                    if predicted_ability_str == "passage_span_extraction":
+                        answer_json["answer_type"] = "passage_span"
+                        answer_json["value"], answer_json["spans"] = \
+                            self._span_prediction(question_passage_tokens[i], best_passage_span[i])
+                    elif predicted_ability_str == "question_span_extraction":
+                        answer_json["answer_type"] = "question_span"
+                        answer_json["value"], answer_json["spans"] = \
+                            self._span_prediction(question_passage_tokens[i], best_question_span[i])
+                    elif predicted_ability_str == "arithmetic":  # plus_minus combination answer
+                        answer_json["answer_type"] = "arithmetic"
+                        original_numbers = metadata[i]['original_numbers']
+    #                     answer_json["value"], answer_json["numbers"] = \
+    #                         self._base_arithmetic_prediction(original_numbers, number_indices[i], best_signs_for_numbers[i])
+                        answer_json["value"], answer_json["expression"] = \
+                            self._adv_arithmetic_prediction(original_numbers, best_expression[i])
+                    elif predicted_ability_str == "counting":
+                        answer_json["answer_type"] = "count"
+                        answer_json["value"], answer_json["count"] = \
+                            self._count_prediction(best_count_number[i])
+                    else:
+                        raise ValueError(f"Unsupported answer ability: {predicted_ability_str}")
 
-                if len(self.answering_abilities) > 1:
-                    predicted_ability_str = self.answering_abilities[best_answer_ability[i].detach().cpu().numpy()]
-                else:
-                    predicted_ability_str = self.answering_abilities[0]
-                answer_json: Dict[str, Any] = {}
+                    output_dict["question_id"].append(metadata[i]["question_id"])
+                    output_dict["answer"].append(answer_json)
 
-                # We did not consider multi-mention answers here
-                if predicted_ability_str == "passage_span_extraction":
-                    answer_json["answer_type"] = "passage_span"
-                    answer_json["value"], answer_json["spans"] = \
-                        self._span_prediction(question_passage_tokens[i], best_passage_span[i])
-                elif predicted_ability_str == "question_span_extraction":
-                    answer_json["answer_type"] = "question_span"
-                    answer_json["value"], answer_json["spans"] = \
-                        self._span_prediction(question_passage_tokens[i], best_question_span[i])
-                elif predicted_ability_str == "arithmetic":  # plus_minus combination answer
-                    answer_json["answer_type"] = "arithmetic"
-                    original_numbers = metadata[i]['original_numbers']
-                    answer_json["value"], answer_json["numbers"] = \
-                        self._base_arithmetic_prediction(original_numbers, number_indices[i], best_signs_for_numbers[i])
-                elif predicted_ability_str == "counting":
-                    answer_json["answer_type"] = "count"
-                    answer_json["value"], answer_json["count"] = \
-                        self._count_prediction(best_count_number[i])
-                else:
-                    raise ValueError(f"Unsupported answer ability: {predicted_ability_str}")
-
-                output_dict["question_id"].append(metadata[i]["question_id"])
-                output_dict["answer"].append(answer_json)
-                answer_annotations = metadata[i].get('answer_annotations', [])
-                if answer_annotations:
-                    self._drop_metrics(answer_json["value"], answer_annotations)
+                    with open("output.txt", "a") as myfile:
+                        myfile.write("answer : " + answer_json["value"] + "\n")
+                        if predicted_ability_str == "arithmetic":
+                            myfile.write("expression : " + " ".join(answer_json["expression"]) + "\n")
+                        
+                    answer_annotations = metadata[i].get('answer_annotations', [])
+                    if answer_annotations:
+                        self._drop_metrics(answer_json["value"], answer_annotations)
 
         return output_dict
     
@@ -404,7 +472,7 @@ class NumericallyAugmentedBERTPlus(Model):
         best_count_number = torch.argmax(count_number_log_probs, -1)
         return count_number_log_probs, best_count_number
     
-    
+
     def _count_log_likelihood(self, answer_as_counts, count_number_log_probs):
         # Count answers are padded with label -1,
         # so we clamp those paddings to 0 and then mask after `torch.gather()`.
@@ -492,7 +560,7 @@ class NumericallyAugmentedBERTPlus(Model):
         # For those padded combinations, we set their log probabilities to be very small negative value
         log_likelihood_for_add_subs = \
             util.replace_masked_values(log_likelihood_for_add_subs, gold_add_sub_mask, -1e7)
-        # Shape: (batch_size, )
+        # Shape: (batch_size,)
         log_marginal_likelihood_for_add_sub = util.logsumexp(log_likelihood_for_add_subs)
         return log_marginal_likelihood_for_add_sub
     
@@ -512,19 +580,68 @@ class NumericallyAugmentedBERTPlus(Model):
         return predicted_answer, numbers
     
     
-    def _adv_arithmetic_module(self, passage_vector, passage_out, number_indices, number_mask):
-        pass
+    def _adv_arithmetic_module(self, summary_vector, maxlen, options, options_mask, bert_out, bert_mask):
+        # summary_vector: (batch, bert_dim)
+        # options : (batch, opnumlen, bert_dim)
+        # options_mask : (batch, opnumlen)
+        # bert_out : (batch, seqlen, bert_dim)
+        # bert_mask: (batch, seqlen)
+        
+        # summary_vector : (batch, explen, bert_dim)
+        summary_vector = summary_vector.unsqueeze(1).expand(-1,maxlen,-1)
+        
+        # out: (batch, explen, rnn_hdim)
+        out, _ = self.rnn(summary_vector)
+        out = self.rnndropout(out)
+        out = self.Wst(out)
+
+        # alpha : (batch, explen, seqlen)
+        alpha = torch.bmm(out, bert_out.transpose(1,2))
+        alpha = util.masked_softmax(alpha, bert_mask)
+        
+        # context : (batch, explen, bert_dim)
+        context = util.weighted_sum(bert_out, alpha)
+#         context = self.Wcon(context)
+        
+        # logits : (batch, explen, opnumlen)
+        logits = torch.bmm(context, options.transpose(1,2))
+        logits =  util.replace_masked_values(logits, options_mask.unsqueeze(1).expand_as(logits), -1e7)
+        
+        number_mask = options_mask.clone()
+        number_mask[:,:self.num_ops] = 0
+        op_mask = options_mask.clone()
+        op_mask[:,self.num_ops:] = 0
+        
+        best_expression = beam_search(self.arithmetic_K, logits.softmax(-1),\
+                                                number_mask, op_mask, self.END, self.num_ops)
+        
+        return logits, best_expression[0]
     
     
-    def _adv_arithmetic_log_likelihood(self,
-                                        answer_as_expressions,
-                                        expression_log_probs,
-                                        number_mask):
-        pass
-    
-    
-    def _adv_arithmetic_prediction(self, original_numbers, number_indices, best_expression):
-        pass
+    def _adv_arithmetic_log_likelihood(self, arithmetic_logits, answer_as_expressions):
+        (batch,num_ans,explen) = answer_as_expressions.shape
+        opnumlen = arithmetic_logits.shape[-1]
+        
+        # logits : (batch,#answers,explen,opnumlen)
+        arithmetic_logits = arithmetic_logits.unsqueeze(1).expand(batch,num_ans,explen,opnumlen)
+
+        # Shape : (batch,#answers,explen)
+        log_likelihood = -self.arith_criterion(arithmetic_logits.permute(0,3,1,2), answer_as_expressions)
+        # Shape : (batch,#answer)
+        log_likelihood = log_likelihood.sum(-1)
+        log_likelihood = util.replace_masked_values(log_likelihood, log_likelihood != 0, -1e7)
+        # Shape : (batch,) 
+        log_marginal_likelihood_for_arithmetic = util.logsumexp(log_likelihood)
+        return log_marginal_likelihood_for_arithmetic
+        
+        
+    def _adv_arithmetic_prediction(self, original_numbers, best_expression):
+        with torch.no_grad():
+            if best_expression[0] == -100 or (len(best_expression) == self.max_explen):
+                return "0", ["None"]
+            out = self.ops + original_numbers
+            exp_string = [str(out[idx]) for idx in best_expression]
+            return evaluate_postfix(exp_string), exp_string
     
     
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:

@@ -1,7 +1,7 @@
 from namedtensor import ntorch
 import torch
-from drop_nmn.activations import ReLU, Identity
-import drop_nmn.nhelpers as nhelpers
+from drop_bert.activations import ReLU, Identity
+import drop_bert.nhelpers as nhelpers
 from allennlp.models.model import Model
 from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
 

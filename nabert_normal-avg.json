@@ -11,7 +11,7 @@
                 "pretrained_model": "bert-base-uncased"
             }   
         },
-        'extra_numbers' : [100, 1]
+        'extra_numbers' : [100]
     },
     "iterator": {
         "type": "basic",
@@ -21,12 +21,13 @@
         "type": "nabert",
         "bert_pretrained_model": "bert-base-uncased",
         "dropout_prob": 0.1,
-        "special_numbers": [100, 1]
+        "special_numbers": [100],
+        "number_rep": "average"
     },
     "train_data_path": "data/drop_dataset_train.json",
     "validation_data_path": "data/drop_dataset_dev.json",
     "trainer": {
-        "cuda_device": 1,
+        "cuda_device": 2,
         "keep_serialized_model_every_num_seconds": 3600,
         "num_epochs": 20,
         "optimizer": {

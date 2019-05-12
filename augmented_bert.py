@@ -11,7 +11,7 @@
 # from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
 # from pytorch_pretrained_bert import BertModel, BertTokenizer
 
-# from drop_nmn.nhelpers import tokenlist_to_passage
+# from drop_bert.nhelpers import tokenlist_to_passage
 
 # logger = logging.getLogger(__name__)
 
@@ -545,11 +545,11 @@ from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
 from pytorch_pretrained_bert import BertModel, BertTokenizer
 
 
-from drop_nmn.nhelpers import tokenlist_to_passage
+from drop_bert.nhelpers import tokenlist_to_passage
 
 logger = logging.getLogger(__name__)
 
-@Model.register("nabert")
+# @Model.register("nabert")
 class NumericallyAugmentedBERT(Model):
     """
     This class augments BERT with some rudimentary numerical reasoning abilities. This is based on
@@ -630,8 +630,8 @@ class NumericallyAugmentedBERT(Model):
             alpha = self._question_weights_predictor(encoding).squeeze()
         else:
             # Shape: (batch_size, #num of numbers, seqlen)
-            alpha = self._number_weights_predictor(encoding).squeeze()
-#             alpha = torch.zeros(encoding.shape[:-1], device=encoding.device)
+#             alpha = self._number_weights_predictor(encoding).squeeze()
+            alpha = torch.zeros(encoding.shape[:-1], device=encoding.device)
         # Shape: (batch_size, seqlen) 
         # (batch_size, #num of numbers, seqlen) for numbers
         alpha = masked_softmax(alpha, mask)

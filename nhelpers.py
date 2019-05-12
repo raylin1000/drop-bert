@@ -4,6 +4,7 @@ import numpy as np
 import string
 from word2number.w2n import word_to_num
 from allennlp.nn.util import replace_masked_values
+from itertools import permutations
 
 # def repeat(tensor, dims_sizes):
 #     names = tensor._schema._names
@@ -243,7 +244,7 @@ def evaluate_postfix(exp):
             result = "0"
         return result
     
-def get_exp(numbers, operations, op_dict, max_depth):
+def get_full_exp(numbers, operations, op_dict, max_depth):
     num_ops = len(operations)
     target_to_exp = defaultdict(list)
     for depth in range(2, max_depth + 1):
@@ -305,4 +306,12 @@ def get_answer_type(answers):
         return 'multiple_span'
     elif any(answers['date'].values()):
         return 'date'
+    
+def get_template_exp(numbers):
+    # two number templates
+    
+    # three number templates
+    
+    pass
+    
     

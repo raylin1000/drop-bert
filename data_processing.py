@@ -23,7 +23,7 @@ from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
 
 from pytorch_pretrained_bert import BertTokenizer
 
-from drop_nmn.nhelpers import *
+from drop_bert.nhelpers import *
 
 @DatasetReader.register("pickled")
 class PickleReader(DatasetReader):
@@ -74,8 +74,9 @@ class BertDropReader(DatasetReader):
                  wordpiece_numbers: bool = True,
                  number_tokenizer: Tokenizer = None,
                  custom_word_to_num: bool = True,
-                 adv_expr: bool = False,
-                 max_depth: int = 3):
+                 exp_search: str = 'add_sub',
+                 max_depth: int = 3,
+                 extra_numbers: List[float] = []):
         super(BertDropReader, self).__init__(lazy)
         self.tokenizer = tokenizer
         self.token_indexers = token_indexers
@@ -87,8 +88,9 @@ class BertDropReader(DatasetReader):
         self.use_validated = use_validated
         self.wordpiece_numbers = wordpiece_numbers
         self.number_tokenizer = number_tokenizer or WordTokenizer()
-        self.adv_expr = adv_expr
+        self.exp_search = exp_search
         self.max_depth = max_depth
+        self.extra_numbers = extra_numbers
         self.op_dict = {'+': operator.add, '-': operator.sub, '*': operator.mul, '/': operator.truediv}
         self.operations = list(enumerate(self.op_dict.keys()))
         if custom_word_to_num:
@@ -131,8 +133,8 @@ class BertDropReader(DatasetReader):
             
             # Get all passage expressions
             expressions = None
-            if self.adv_expr:
-                expressions = self.get_exp(list(enumerate([100] + numbers_in_passage)),
+            if self.exp_search == 'full':
+                expressions = get_full_exp(list(enumerate(self.extra_numbers + numbers_in_passage)),
                                            self.operations,
                                            self.op_dict,
                                            self.max_depth)
@@ -210,6 +212,7 @@ class BertDropReader(DatasetReader):
              for i, start_ind in enumerate(number_indices)]
         fields["number_indices"] = ListField(number_token_indices)
         numbers_in_passage_field = TextField(number_tokens, self.token_indexers)
+        extra_numbers_field = TextField([Token(str(num)) for num in self.extra_numbers], self.token_indexers)
         mask_index_fields: List[Field] = [IndexField(index, question_passage_field) for index in mask_indices]
         fields["mask_indices"] = ListField(mask_index_fields)
         
@@ -218,6 +221,7 @@ class BertDropReader(DatasetReader):
                     "original_question": question_text,
                     "original_numbers": numbers_in_passage,
                     "original_number_words": number_words,
+                    "extra_numbers": self.extra_numbers,
                     "passage_tokens": passage_tokens,
                     "question_tokens": question_tokens,
                     "question_passage_tokens": question_passage_tokens,
@@ -263,18 +267,20 @@ class BertDropReader(DatasetReader):
             valid_expressions: List[List[int]] = []
             exp = None
             if answer_type in ["number", "date"]:
-                if self.adv_expr:
+                if self.exp_search == 'full':
                     exp = []
                     target_exp = [expressions[num] for num in target_numbers]
                     zipped = list(zip(*target_exp))
                     if zipped:
                         valid_expressions = sum(list(zipped[0]), [])
                         exp = sum(list(zipped[1]), [])
-                else:
+                elif self.exp_search == 'add_sub':
                     valid_expressions = \
-                        DropReader.find_valid_add_sub_expressions(numbers_in_passage, 
+                        DropReader.find_valid_add_sub_expressions(self.extra_numbers + numbers_in_passage, 
                                                                   target_numbers, 
                                                                   self.max_numbers_expression)
+                elif self.exp_search == 'template':
+                    pass
                 
             
             # Get possible ways to arrive at target numbers with counting
@@ -289,7 +295,7 @@ class BertDropReader(DatasetReader):
                            "num_spans": num_spans,
                            "expressions": valid_expressions,
                            "counts": valid_counts}
-            if self.adv_expr:
+            if self.exp_search == 'full':
                 answer_info['expr_text'] = exp
             metadata["answer_info"] = answer_info
         
@@ -304,19 +310,29 @@ class BertDropReader(DatasetReader):
                 question_span_fields.append(SpanField(-1, -1, question_passage_field))
             fields["answer_as_question_spans"] = ListField(question_span_fields)
             
-            if not self.adv_expr:
+            if self.exp_search == 'add_sub':
                 add_sub_signs_field: List[Field] = []
+                extra_signs_field: List[Field] = []
                 for signs_for_one_add_sub_expressions in valid_expressions:
-                    add_sub_signs_field.append(SequenceLabelField(signs_for_one_add_sub_expressions, numbers_in_passage_field))
+                    extra_signs = signs_for_one_add_sub_expressions[:len(self.extra_numbers)]
+                    normal_signs = signs_for_one_add_sub_expressions[len(self.extra_numbers):]
+                    add_sub_signs_field.append(SequenceLabelField(normal_signs, numbers_in_passage_field))
+                    extra_signs_field.append(SequenceLabelField(extra_signs, extra_numbers_field))
                 if not add_sub_signs_field:
                     add_sub_signs_field.append(SequenceLabelField([0] * len(number_tokens), numbers_in_passage_field))
+                if not extra_signs_field:
+                    extra_signs_field.append(SequenceLabelField([0] * len(self.extra_numbers), extra_numbers_field))
                 fields["answer_as_expressions"] = ListField(add_sub_signs_field)
-            else:
+                if self.extra_numbers:
+                    fields["answer_as_expressions_extra"] = ListField(extra_signs_field)
+            elif self.exp_search == 'full':
                 expression_indices = \
                     [ArrayField(np.array(expression), padding_value=-1) for expression in valid_expressions]
                 if not expression_indices:
                     expression_indices = [ArrayField(np.array([-1]), padding_value=-1)]
                 fields["answer_as_expressions"] = ListField(expression_indices)
+            elif self.exp_search == 'template':
+                pass
 
             count_fields: List[Field] = [LabelField(count_label, skip_indexing=True) for count_label in valid_counts]
             if not count_fields:

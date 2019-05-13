@@ -16,7 +16,7 @@ from drop_bert.nhelpers import tokenlist_to_passage, beam_search, evaluate_postf
 
 logger = logging.getLogger(__name__)
 
-# @Model.register("nabertT")
+@Model.register("nabertT")
 class NumericallyAugmentedBERTT(Model):
     """
     This class augments BERT with some rudimentary numerical reasoning abilities. This is based on
@@ -270,7 +270,7 @@ class NumericallyAugmentedBERTT(Model):
                     else:
                         predicted_ability_str = self.answering_abilities[0]
                     answer_json: Dict[str, Any] = {}
-                    predicted_ability_str = "arithmetic"
+
                     # We did not consider multi-mention answers here
                     if predicted_ability_str == "passage_span_extraction":
                         answer_json["answer_type"] = "passage_span"
@@ -287,7 +287,7 @@ class NumericallyAugmentedBERTT(Model):
                             self._arithmetic_prediction(original_numbers, 
                                                              arithmetic_best_templates[i],
                                                              arithmetic_best_template_slots[i])
-                        answer_json['template'] = arithmetic_best_templates[i]
+                        answer_json['template'] = arithmetic_best_templates[i].item()
                     elif predicted_ability_str == "counting":
                         answer_json["answer_type"] = "count"
                         answer_json["value"], answer_json["count"] = \
@@ -541,10 +541,13 @@ class NumericallyAugmentedBERTT(Model):
     
     
     def _arithmetic_prediction(self, original_numbers, best_template, best_template_slots):
-        original_numbers = torch.tensor(self.special_numbers + original_numbers, device = best_template.device)
-        indices = best_template_slots[best_template]
-        numbers = torch.gather(original_numbers, -1, indices)
-        predicted_answer = str(self.templates[best_template](*numbers))
+        original_numbers = self.special_numbers + original_numbers
+        indices = best_template_slots[best_template].cpu().numpy().tolist()
+        numbers = [original_numbers[indices[i]] for i in range(self.num_template_slots)]
+        try:
+            predicted_answer = str(float(self.templates[best_template](*numbers)))
+        except:
+            predicted_answer = "0.0"
         return predicted_answer, indices, numbers 
     
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:

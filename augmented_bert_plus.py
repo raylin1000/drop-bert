@@ -69,6 +69,8 @@ class NumericallyAugmentedBERTPlus(Model):
                 self.ff(2 * bert_dim, bert_dim, 1)
             self._question_span_end_predictor = \
                 self.ff(2 * bert_dim, bert_dim, 1)
+            
+            self._qspan_passage_weight_predictor = torch.nn.Linear(bert_dim, 1)
 
         if "arithmetic" in self.answering_abilities:
             self.arithmetic = arithmetic
@@ -91,6 +93,8 @@ class NumericallyAugmentedBERTPlus(Model):
             self._counting_index = self.answering_abilities.index("counting")
             self._count_number_predictor = \
                 self.ff(bert_dim, bert_dim, max_count + 1) 
+            
+            self._count_passage_weight_predictor = torch.nn.Linear(bert_dim, 1)
 
         self._drop_metrics = DropEmAndF1()
         initializer(self)
@@ -105,6 +109,12 @@ class NumericallyAugmentedBERTPlus(Model):
         elif in_type == "arithmetic_passage":
             # Shape: (batch_size, seqlen)
             alpha = self._arithmetic_passage_weight_predictor(encoding).squeeze()
+        elif in_type == "qspan_passage":
+            # Shape: (batch_size, seqlen)
+            alpha = self._qspan_passage_weight_predictor(encoding).squeeze()
+        elif in_type == "count_passage":
+            # Shape: (batch_size, seqlen)
+            alpha = self._count_passage_weight_predictor(encoding).squeeze()
         elif in_type == "arithmetic":
             # Shape: (batch_size, seqlen)
             alpha = self._arithmetic_weights_predictor(encoding).squeeze()
@@ -213,7 +223,7 @@ class NumericallyAugmentedBERTPlus(Model):
             options_mask = torch.cat([op_mask, number_mask], -1)
             ops = self.op_embeddings(torch.arange(self.num_ops + 1, device=number_mask.device).expand(batch_size,-1))
             options = torch.cat([self.Wo(ops), self.Wc(encoded_numbers)], 1)
-
+        
         if len(self.answering_abilities) > 1:
             # Shape: (batch_size, number_of_abilities)
             answer_ability_logits = \
@@ -222,15 +232,17 @@ class NumericallyAugmentedBERTPlus(Model):
             best_answer_ability = torch.argmax(answer_ability_log_probs, 1)
 
         if "counting" in self.answering_abilities:
-            count_number_log_probs, best_count_number = self._count_module(passage_vector)
+            count_passage_vector = self.summary_vector(passage_out, passage_mask, "count_passage")
+            count_number_log_probs, best_count_number = self._count_module(count_passage_vector)
 
         if "passage_span_extraction" in self.answering_abilities:
             passage_span_start_log_probs, passage_span_end_log_probs, best_passage_span = \
                 self._passage_span_module(passage_out, passage_mask)
 
         if "question_span_extraction" in self.answering_abilities:
+            qspan_passage_vector = self.summary_vector(passage_out, passage_mask, "qspan_passage")
             question_span_start_log_probs, question_span_end_log_probs, best_question_span = \
-                self._question_span_module(passage_vector, question_out, question_mask)
+                self._question_span_module(qspan_passage_vector, question_out, question_mask)
             
         if "arithmetic" in self.answering_abilities:
             if self.arithmetic == "base":

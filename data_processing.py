@@ -32,11 +32,8 @@ class PickleReader(DatasetReader):
     
     @overrides
     def _read(self, file_path: str):
-        instances = []
-        for part in tqdm(os.listdir(file_path)):
-            with open(os.path.join(file_path, part), 'rb') as dataset_file:
-                instances += pickle.load(dataset_file)
-        return instances
+        with open(os.path.join(file_path), 'rb') as dataset_file:
+            return pickle.load(dataset_file)
 
 @Tokenizer.register("bert-drop")
 class BertDropTokenizer(Tokenizer):
@@ -93,6 +90,16 @@ class BertDropReader(DatasetReader):
         self.extra_numbers = extra_numbers
         self.op_dict = {'+': operator.add, '-': operator.sub, '*': operator.mul, '/': operator.truediv}
         self.operations = list(enumerate(self.op_dict.keys()))
+        self.templates = [lambda x,y,z: (x + y) * z,
+                          lambda x,y,z: (x - y) * z,
+                          lambda x,y,z: (x + y) / z,
+                          lambda x,y,z: (x - y) / z,
+                          lambda x,y,z: x * y / z]
+        self.template_strings = ['(%s + %s) * %s',
+                                 '(%s - %s) * %s',
+                                 '(%s + %s) / %s',
+                                 '(%s - %s) / %s',
+                                 '%s * %s / %s',]
         if custom_word_to_num:
             self.word_to_num = get_number_from_word
         else:
@@ -131,14 +138,6 @@ class BertDropReader(DatasetReader):
                 passage_tokens += wordpieces
                 curr_index += num_wordpieces
             
-            # Get all passage expressions
-            expressions = None
-            if self.exp_search == 'full':
-                expressions = get_full_exp(list(enumerate(self.extra_numbers + numbers_in_passage)),
-                                           self.operations,
-                                           self.op_dict,
-                                           self.max_depth)
-            
             # Process questions from this passage
             for question_answer in passage_info["qa_pairs"]:
                 question_id = question_answer["query_id"]
@@ -159,8 +158,7 @@ class BertDropReader(DatasetReader):
                                                  number_len,
                                                  question_id,
                                                  passage_id,
-                                                 answer_annotations,
-                                                 expressions)
+                                                 answer_annotations)
                 if instance is not None:
                     instances.append(instance)
         return instances
@@ -176,8 +174,7 @@ class BertDropReader(DatasetReader):
                          number_len: List[int],
                          question_id: str = None, 
                          passage_id: str = None,
-                         answer_annotations: List[Dict] = None,
-                         expressions: Dict[Any, Any] = None
+                         answer_annotations: List[Dict] = None
                          ) -> Union[Instance, None]:
         # Tokenize question and passage
         question_tokens = self.tokenizer.tokenize(question_text)
@@ -198,6 +195,7 @@ class BertDropReader(DatasetReader):
         number_len = number_len + [1]
         numbers_in_passage = numbers_in_passage + [0]
         number_tokens = [Token(str(number)) for number in numbers_in_passage]
+        extra_number_tokens = [Token(str(num)) for num in self.extra_numbers]
         
         mask_indices = [0, qlen + 1, len(question_passage_tokens) - 1]
         
@@ -212,7 +210,8 @@ class BertDropReader(DatasetReader):
              for i, start_ind in enumerate(number_indices)]
         fields["number_indices"] = ListField(number_token_indices)
         numbers_in_passage_field = TextField(number_tokens, self.token_indexers)
-        extra_numbers_field = TextField([Token(str(num)) for num in self.extra_numbers], self.token_indexers)
+        extra_numbers_field = TextField(extra_number_tokens, self.token_indexers)
+        all_numbers_field = TextField(extra_number_tokens + number_tokens, self.token_indexers)
         mask_index_fields: List[Field] = [IndexField(index, question_passage_field) for index in mask_indices]
         fields["mask_indices"] = ListField(mask_index_fields)
         
@@ -265,22 +264,30 @@ class BertDropReader(DatasetReader):
             # Get possible ways to arrive at target numbers with add/sub        
             
             valid_expressions: List[List[int]] = []
-            exp = None
+            exp_strings = None
             if answer_type in ["number", "date"]:
                 if self.exp_search == 'full':
-                    exp = []
-                    target_exp = [expressions[num] for num in target_numbers]
-                    zipped = list(zip(*target_exp))
+                    expressions = get_full_exp(list(enumerate(self.extra_numbers + numbers_in_passage)),
+                                               target_numbers,
+                                               self.operations,
+                                               self.op_dict,
+                                               self.max_depth)
+                    zipped = list(zip(*expressions))
                     if zipped:
-                        valid_expressions = sum(list(zipped[0]), [])
-                        exp = sum(list(zipped[1]), [])
+                        valid_expressions = list(zipped[0])
+                        exp_strings = list(zipped[1])
                 elif self.exp_search == 'add_sub':
                     valid_expressions = \
                         DropReader.find_valid_add_sub_expressions(self.extra_numbers + numbers_in_passage, 
                                                                   target_numbers, 
                                                                   self.max_numbers_expression)
                 elif self.exp_search == 'template':
-                    pass
+                    valid_expressions, exp_strings = \
+                        get_template_exp(self.extra_numbers + numbers_in_passage, 
+                                         target_numbers,
+                                         self.templates,
+                                         self.template_strings)
+                    exp_strings = sum(exp_strings, [])
                 
             
             # Get possible ways to arrive at target numbers with counting
@@ -295,8 +302,8 @@ class BertDropReader(DatasetReader):
                            "num_spans": num_spans,
                            "expressions": valid_expressions,
                            "counts": valid_counts}
-            if self.exp_search == 'full':
-                answer_info['expr_text'] = exp
+            if self.exp_search in ['template', 'full']:
+                answer_info['expr_text'] = exp_strings
             metadata["answer_info"] = answer_info
         
             # Add answer fields
@@ -325,14 +332,16 @@ class BertDropReader(DatasetReader):
                 fields["answer_as_expressions"] = ListField(add_sub_signs_field)
                 if self.extra_numbers:
                     fields["answer_as_expressions_extra"] = ListField(extra_signs_field)
-            elif self.exp_search == 'full':
-                expression_indices = \
-                    [ArrayField(np.array(expression), padding_value=-1) for expression in valid_expressions]
+            elif self.exp_search in ['template', 'full']:
+                expression_indices = []
+                for expression in valid_expressions:
+                    if not expression:
+                        expression.append(3 * [-1])
+                    expression_indices.append(ArrayField(np.array(expression), padding_value=-1))
                 if not expression_indices:
-                    expression_indices = [ArrayField(np.array([-1]), padding_value=-1)]
+                    expression_indices = \
+                        [ArrayField(np.array([3 * [-1]]), padding_value=-1) for _ in range(len(self.templates))]
                 fields["answer_as_expressions"] = ListField(expression_indices)
-            elif self.exp_search == 'template':
-                pass
 
             count_fields: List[Field] = [LabelField(count_label, skip_indexing=True) for count_label in valid_counts]
             if not count_fields:

@@ -244,16 +244,17 @@ def evaluate_postfix(exp):
             result = "0"
         return result
     
-def get_full_exp(numbers, operations, op_dict, max_depth):
+def get_full_exp(numbers, targets, operations, op_dict, max_depth):
     num_ops = len(operations)
-    target_to_exp = defaultdict(list)
+    expressions = []
     for depth in range(2, max_depth + 1):
         stack = [([], set(), 0, 0, [])]
         while stack:
             exp, used_nums, num_num, num_op, eval_stack = stack.pop()
             # Expression complete
             if len(exp) == 2 * depth - 1:
-                target_to_exp[eval_stack[0]].append(exp + [(0, '')])
+                if eval_stack[0] in targets:
+                    expressions.append(exp + [(0, '')])
 
             # Can add num
             if num_num < depth:
@@ -275,12 +276,11 @@ def get_full_exp(numbers, operations, op_dict, max_depth):
                         stack.append((new_exp, used_nums, num_num, num_op + 1, new_eval_stack))
                     except ZeroDivisionError:
                         pass
-    for number in target_to_exp:
-        for ind, exp in enumerate(target_to_exp[number]):
-            zipped = list(zip(*exp))
-            target_to_exp[number][ind] = (list(zipped[0]), ' '.join([str(x) for x in zipped[1]]))
-        target_to_exp[number] = tuple([list(x) for x in zip(*target_to_exp[number])])
-    return target_to_exp
+        
+    for ind, exp in enumerate(expressions):
+        zipped = list(zip(*exp))
+        expressions[ind] = (list(zipped[0]), ' '.join([str(x) for x in zipped[1]]))
+    return expressions
 
 def clipped_passage_num(number_indices, number_len, numbers_in_passage, plen):
     if number_indices[-1] < plen:
@@ -307,11 +307,18 @@ def get_answer_type(answers):
     elif any(answers['date'].values()):
         return 'date'
     
-def get_template_exp(numbers):
-    # two number templates
-    
-    # three number templates
-    
-    pass
-    
-    
+def get_template_exp(numbers, targets, templates, template_strings):
+    valid_expressions_indices = [[] for _ in range(len(templates))]
+    valid_expressions_strings = [[] for _ in range(len(templates))]
+    for number_combination in permutations(enumerate(numbers), 3):
+        num_indices, num = list(zip(*number_combination))
+        num_strings = tuple([str(x) for x in num])
+        for ind, template in enumerate(templates):
+            try:
+                if template(*num) in targets:
+                    valid_expressions_indices[ind].append(list(num_indices))
+                    valid_expressions_strings[ind].append(template_strings[ind] % num_strings)
+            except ZeroDivisionError:
+                continue 
+    return valid_expressions_indices, valid_expressions_strings
+   

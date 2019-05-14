@@ -16,7 +16,7 @@ from drop_bert.nhelpers import tokenlist_to_passage, beam_search, evaluate_postf
 
 logger = logging.getLogger(__name__)
 
-@Model.register("nabert")
+# @Model.register("nabert")
 class NumericallyAugmentedBERTPlus(Model):
     """
     This class augments BERT with some rudimentary numerical reasoning abilities. This is based on
@@ -69,32 +69,23 @@ class NumericallyAugmentedBERTPlus(Model):
                 self.ff(2 * bert_dim, bert_dim, 1)
             self._question_span_end_predictor = \
                 self.ff(2 * bert_dim, bert_dim, 1)
-            
-            self._qspan_passage_weight_predictor = torch.nn.Linear(bert_dim, 1)
 
         if "arithmetic" in self.answering_abilities:
             self.arithmetic = arithmetic
             self._arithmetic_index = self.answering_abilities.index("arithmetic")
-            if special_numbers != None:
-                self.special_numbers = special_numbers
-                self.num_special_numbers = len(self.special_numbers)
-                self.special_embedding = torch.nn.Embedding(self.num_special_numbers, bert_dim)
-            else:
-                self.num_special_numbers = 0
+            self.special_numbers = special_numbers
+            self.num_special_numbers = len(self.special_numbers)
+            self.special_embedding = torch.nn.Embedding(self.num_special_numbers, bert_dim)
             if self.arithmetic == "base":
                 self._number_sign_predictor = \
                     self.ff(2 * bert_dim, bert_dim, 3)
             else:
                 self.init_arithmetic(bert_dim, bert_dim, bert_dim, layers=2, dropout=dropout_prob)
-                
-            self._arithmetic_passage_weight_predictor = torch.nn.Linear(bert_dim, 1)
 
         if "counting" in self.answering_abilities:
             self._counting_index = self.answering_abilities.index("counting")
             self._count_number_predictor = \
                 self.ff(bert_dim, bert_dim, max_count + 1) 
-            
-            self._count_passage_weight_predictor = torch.nn.Linear(bert_dim, 1)
 
         self._drop_metrics = DropEmAndF1()
         initializer(self)
@@ -106,15 +97,6 @@ class NumericallyAugmentedBERTPlus(Model):
         elif in_type == "question":
             # Shape: (batch_size, seqlen)
             alpha = self._question_weights_predictor(encoding).squeeze()
-        elif in_type == "arithmetic_passage":
-            # Shape: (batch_size, seqlen)
-            alpha = self._arithmetic_passage_weight_predictor(encoding).squeeze()
-        elif in_type == "qspan_passage":
-            # Shape: (batch_size, seqlen)
-            alpha = self._qspan_passage_weight_predictor(encoding).squeeze()
-        elif in_type == "count_passage":
-            # Shape: (batch_size, seqlen)
-            alpha = self._count_passage_weight_predictor(encoding).squeeze()
         elif in_type == "arithmetic":
             # Shape: (batch_size, seqlen)
             alpha = self._arithmetic_weights_predictor(encoding).squeeze()
@@ -223,7 +205,7 @@ class NumericallyAugmentedBERTPlus(Model):
             options_mask = torch.cat([op_mask, number_mask], -1)
             ops = self.op_embeddings(torch.arange(self.num_ops + 1, device=number_mask.device).expand(batch_size,-1))
             options = torch.cat([self.Wo(ops), self.Wc(encoded_numbers)], 1)
-        
+
         if len(self.answering_abilities) > 1:
             # Shape: (batch_size, number_of_abilities)
             answer_ability_logits = \
@@ -232,24 +214,21 @@ class NumericallyAugmentedBERTPlus(Model):
             best_answer_ability = torch.argmax(answer_ability_log_probs, 1)
 
         if "counting" in self.answering_abilities:
-            count_passage_vector = self.summary_vector(passage_out, passage_mask, "count_passage")
-            count_number_log_probs, best_count_number = self._count_module(count_passage_vector)
+            count_number_log_probs, best_count_number = self._count_module(passage_vector)
 
         if "passage_span_extraction" in self.answering_abilities:
             passage_span_start_log_probs, passage_span_end_log_probs, best_passage_span = \
                 self._passage_span_module(passage_out, passage_mask)
 
         if "question_span_extraction" in self.answering_abilities:
-            qspan_passage_vector = self.summary_vector(passage_out, passage_mask, "qspan_passage")
             question_span_start_log_probs, question_span_end_log_probs, best_question_span = \
-                self._question_span_module(qspan_passage_vector, question_out, question_mask)
+                self._question_span_module(passage_vector, question_out, question_mask)
             
         if "arithmetic" in self.answering_abilities:
             if self.arithmetic == "base":
-                arithmetic_passage_vector = self.summary_vector(passage_out, passage_mask, "arithmetic_passage")
                 number_mask = (number_indices[:,:,0].long() != -1).long()
                 number_sign_log_probs, best_signs_for_numbers, number_mask = \
-                    self._base_arithmetic_module(arithmetic_passage_vector, passage_out, number_indices, number_mask)
+                    self._base_arithmetic_module(passage_vector, passage_out, number_indices, number_mask)
             else:
                 arithmetic_logits, best_expression = \
                     self._adv_arithmetic_module(arithmetic_summary, self.max_explen, options, options_mask, \
@@ -592,8 +571,7 @@ class NumericallyAugmentedBERTPlus(Model):
     
     def _base_arithmetic_prediction(self, original_numbers, number_indices, best_signs_for_numbers):
         sign_remap = {0: 0, 1: 1, 2: -1}
-        if self.num_special_numbers > 0:
-            original_numbers = self.special_numbers + original_numbers
+        original_numbers = self.special_numbers + original_numbers
         predicted_signs = [sign_remap[it] for it in best_signs_for_numbers.detach().cpu().numpy()]
         result = sum([sign * number for sign, number in zip(predicted_signs, original_numbers)])
         predicted_answer = str(result)

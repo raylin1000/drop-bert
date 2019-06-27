@@ -2,7 +2,7 @@
 
 This repository contains the code for our CS 287 spring 2019 final project.
 
-The code requires pytorch and allennlp.
+The code requires `allennlp` version `0.8.3`, which can be installed by running `pip install allennlp==0.8.3`. When we set up our environment, we followed the instructions at the allennlp repo [here](https://github.com/allenai/allennlp).
 
 The `notebooks` folder contains notebooks for generating specs for the DROP dataset and metrics for a trained model, as well
 as a sample notebook containing a sample `allennlp train` command we used to train our models.

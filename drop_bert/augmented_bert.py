@@ -16,7 +16,7 @@ from drop_bert.nhelpers import tokenlist_to_passage, beam_search, evaluate_postf
 
 logger = logging.getLogger(__name__)
 
-@Model.register("nabert_old")
+@Model.register("nabert")
 class NumericallyAugmentedBERT(Model):
     """
     This class augments BERT with some rudimentary numerical reasoning abilities. This is based on
